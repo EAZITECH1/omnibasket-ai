@@ -1,0 +1,52 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #0a0a0a;
+  --foreground: #e6e6e6;
+  --muted: #161616;
+  --muted-foreground: #9a9a9a;
+  --border: #e6e6e6;
+  --card: #141414;
+  --card-foreground: #e6e6e6;
+  --ring: #e6e6e6;
+  --accent: #F0B90B;
+  --accent-strong: #e6e6e6;
+  --accent-foreground: #0a0a0a;
+  --accent-soft: #1f1f1f;
+  --success: #34d399;
+  --shadow-box: 4px 4px 0 0 #e6e6e6;
+  --shadow-box-sm: 2px 2px 0 0 #e6e6e6;
+  --shadow-box-yellow: 4px 4px 0 0 #F0B90B;
+}
+
+body {
+  color: var(--foreground);
+  background-color: var(--background);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  overflow-x: hidden;
+}
+
+.bg-dots {
+  background-image: radial-gradient(var(--border) 1px, transparent 1.5px);
+  opacity: .12;
+  background-position: -1px -1px;
+  background-size: 20px 20px;
+}
+
+/* Custom scrollbars in neo-brutalist style */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0a0a0a;
+  border-left: 1px solid var(--border);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #F0B90B;
+}

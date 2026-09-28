@@ -1,0 +1,30 @@
+{
+  "name": "omnibasket-ai",
+  "version": "1.0.0",
+  "description": "OmniBasket AI: Autonomous Thematic Stock Baskets & 24/7 Smart DCA on BNB Smart Chain",
+  "main": "src/app/page.js",
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "test-tokens": "node src/test-tokens.js",
+    "test-quote": "node --env-file=.env src/test-quote.js"
+  },
+  "dependencies": {
+    "@binance/agentic-wallet": "^1.10.0",
+    "clsx": "^2.1.1",
+    "dotenv": "^16.4.5",
+    "lucide-react": "^1.16.0",
+    "next": "14.2.35",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "recharts": "^2.15.4",
+    "tailwind-merge": "^3.5.0"
+  },
+  "devDependencies": {
+    "autoprefixer": "^10.4.27",
+    "postcss": "^8.5.8",
+    "tailwindcss": "^3.4.19"
+  }
+}
