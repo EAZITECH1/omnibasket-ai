@@ -274,9 +274,9 @@ export default function Home() {
                 BNB Smart Chain · Tokenized Stocks
               </div>
 
-              <h1 className="text-4xl font-black uppercase leading-[0.95] tracking-tight sm:text-6xl">
-                Autonomous<br />
-                <span className="bg-foreground px-1 text-background box-decoration-clone">stock baskets</span>
+              <h1 className="text-4xl font-black uppercase tracking-tight sm:text-6xl flex flex-col items-start gap-2.5 sm:gap-3.5">
+                <span>Autonomous</span>
+                <span className="bg-foreground px-2 py-0.5 text-background inline-block">stock baskets</span>
               </h1>
 
               <p className="mt-6 max-w-xl text-base text-muted-foreground sm:text-lg">
