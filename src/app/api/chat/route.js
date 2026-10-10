@@ -37,7 +37,29 @@ export async function POST(req) {
     const activeOpenAiKey = apiKey || process.env.OPENAI_API_KEY || process.env.OPENROUTER_API_KEY;
     const isOpenRouterKey = (apiKey && apiKey.startsWith('sk-or-')) || (!apiKey && !!process.env.OPENROUTER_API_KEY);
 
-    // Detect explicit deposit/order size intent in prompt (e.g. "$50", "25 USDT", "$10", "order size 50")
+    // Helper to get real wallet state via Binance Agentic Wallet (baw)
+    let liveWallet = { connected: false, usdtBal: 0, bnbBal: 0, heldStocks: [], tokens: [] };
+    try {
+      const { stdout: balOut } = await execPromise('baw wallet balance --binanceChainId 56 --json');
+      const balParsed = JSON.parse(balOut);
+      if (balParsed.success && Array.isArray(balParsed.data)) {
+        const balList = balParsed.data;
+        const usdtToken = balList.find(t => t.address.toLowerCase() === USDT_ADDRESS.toLowerCase());
+        const bnbToken = balList.find(t => t.address.toLowerCase() === '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee');
+        const usdtBal = usdtToken ? parseFloat(usdtToken.balance || 0) : 0;
+        const bnbBal = bnbToken ? parseFloat(bnbToken.balance || 0) : 0;
+        const heldStocks = balList.filter(t => 
+          t.address.toLowerCase() !== USDT_ADDRESS.toLowerCase() &&
+          t.address.toLowerCase() !== '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' &&
+          parseFloat(t.balance || 0) > 0.000001
+        );
+        liveWallet = { connected: true, usdtBal, bnbBal, heldStocks, tokens: balList };
+      }
+    } catch (e) {
+      console.warn('Wallet balance query warning:', e.message);
+    }
+
+    // Detect explicit deposit/order size intent in prompt (e.g. "$50", "25 USDT", "$10", "order size 50", "allocate $50")
     const amtMatch = lower.match(/(?:\$)\s*(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*(?:usd|usdt|\$)|(?:order size|deposit|size|allocate|invest)\s+(?:of\s+)?(?:\$)?(\d+(?:\.\d+)?)/i);
     let detectedDepositAmount = null;
     if (amtMatch) {
@@ -47,19 +69,85 @@ export async function POST(req) {
       }
     }
 
-    if (lower.startsWith('set order size') || lower.startsWith('change order size') || lower.startsWith('set deposit') || lower.startsWith('change deposit') || lower.startsWith('set size') || lower.startsWith('change size')) {
-      if (detectedDepositAmount) {
-        return Response.json({
-          type: 'INFO',
-          reply: `✅ **Order Size Updated**: Thematic stock basket order size is now set to **$${detectedDepositAmount.toFixed(2)} USDT**.\n\nThe Thematic Basket Suite has synced to this allocation size.`,
-          depositAmount: detectedDepositAmount,
-          marketStatus,
-          modelUsed: 'OmniBasket Neuro ⚡'
-        });
-      }
+    // 0A. WALLET BALANCE & PORTFOLIO INQUIRIES
+    const isBalanceOrPortfolioQuery = 
+      (lower.includes('balance') || lower.includes('portfolio') || lower.includes('holding') || lower.includes('what do i own') || lower.includes('what do i have') || lower.includes('how much money') || lower.includes('how much usdt') || lower.includes('my wallet') || lower.includes('positions') || lower.includes('what tokens')) &&
+      !lower.includes('sell') && !lower.includes('swap') && !lower.includes('rotate') && !lower.includes('liquidate') && !lower.includes('convert');
+
+    if (isBalanceOrPortfolioQuery) {
+      const stockSummary = liveWallet.heldStocks.length > 0
+        ? liveWallet.heldStocks.map(s => `• **${s.symbol}**: \`${parseFloat(s.balance).toFixed(4)}\` (~$${parseFloat(s.value || 0).toFixed(2)} USD)`).join('\n')
+        : '• _No active tokenized stock positions currently held (100% liquid stablecoin)._';
+
+      const buyingPower = liveWallet.usdtBal >= 5
+        ? `💡 **Buying Power**: You have **$${liveWallet.usdtBal.toFixed(2)} USDT** liquid, ready to allocate across AI stocks or Ondo US Treasury yield (meets Binance Agentic Wallet $5 order minimum).`
+        : `⚠️ **Deposit Notice**: You currently have **$${liveWallet.usdtBal.toFixed(2)} USDT**. Binance Agentic Wallet requires a **$5.00 minimum swap size** per trade on BSC.`;
+
+      return Response.json({
+        type: 'INFO',
+        reply: `💼 **Live Wallet Portfolio (BNB Smart Chain #56)**:\n\n• **Liquid USDT**: **$${liveWallet.usdtBal.toFixed(2)} USDT**\n• **Gas Reserve**: **${liveWallet.bnbBal.toFixed(4)} BNB** (~$${(liveWallet.bnbBal * 750).toFixed(2)} USD)\n\n**Active Tokenized Equities**:\n${stockSummary}\n\n${buyingPower}\n\n*Synced live from Binance Agentic Wallet on BSC Mainnet.*`,
+        marketStatus,
+        modelUsed: model.startsWith('gpt') ? 'BNB Agent Studio (GPT-4o) 🧠' : model.startsWith('gemini') ? 'Google Gemini 1.5 Flash 🤖' : 'OmniBasket Neuro ⚡'
+      });
     }
 
-    // 0. TRADE & ROTATION INTENTS (Reverse Exit to USDT & Stock-to-Stock)
+    // 0B. ORDER SIZING & ALLOCATION COMMANDS (e.g. "Allocate $50", "Invest $25", "Set size to $10")
+    const hasTickerInPrompt = Object.keys(TICKER_SYNONYMS).some(ticker => 
+      TICKER_SYNONYMS[ticker].some(syn => lower.includes(syn))
+    );
+
+    const isOrderSizingCommand = 
+      detectedDepositAmount && !hasTickerInPrompt && (
+        lower.startsWith('allocate') || lower.startsWith('invest') || lower.startsWith('deposit') ||
+        lower.startsWith('set') || lower.startsWith('change') || lower.startsWith('order size') ||
+        lower.startsWith('size') || lower === `$${detectedDepositAmount}` || lower === `${detectedDepositAmount} usdt` ||
+        lower === `${detectedDepositAmount}$` || lower === `${detectedDepositAmount} usd` ||
+        lower.includes('order size') || lower.includes('deposit amount')
+      );
+
+    if (isOrderSizingCommand) {
+      return Response.json({
+        type: 'INFO',
+        reply: `✅ **Order Size Updated**: Thematic stock basket order size is now set to **$${detectedDepositAmount.toFixed(2)} USDT**.\n\nThe Thematic Basket Suite has synced to this allocation size. You can now test quotes, run pre-transaction simulation, or execute on BSC with this size.`,
+        depositAmount: detectedDepositAmount,
+        marketStatus,
+        modelUsed: 'OmniBasket Neuro ⚡'
+      });
+    }
+
+    // 0C. REBALANCE & DRIFT SENTINEL INQUIRIES
+    const isRebalanceQuery = 
+      (lower.includes('rebalance') || lower.includes('drift') || lower.includes('deviation') || lower.includes('rebalancing')) &&
+      !lower.includes('swap') && !lower.includes('rotate');
+
+    if (isRebalanceQuery) {
+      const stockDesc = liveWallet.heldStocks.length > 0
+        ? `Your active on-chain positions: ${liveWallet.heldStocks.map(s => `${s.symbol} (${parseFloat(s.balance).toFixed(4)})`).join(', ')}.`
+        : `Your connected wallet holds **$${liveWallet.usdtBal.toFixed(2)} USDT** with no drifting equity positions.`;
+
+      return Response.json({
+        type: 'INFO',
+        reply: `⚖️ **24/7 Drift Sentinel & Rebalance Engine**:\n\n• **Status**: Active monitoring across BSC Mainnet\n• **Drift Sensitivity**: Flags any position deviating **>5%** from target weight\n• **Portfolio State**: ${stockDesc}\n\nTo view real-time drift gauges and execute zero-revert rebalancing routes, visit the **[24/7 Rebalance](/rebalance)** dashboard!`,
+        marketStatus,
+        modelUsed: 'OmniBasket Neuro ⚡'
+      });
+    }
+
+    // 0D. BASKET EXECUTION & DEPLOY GUIDANCE
+    const isExecuteBasketQuery = 
+      (lower.includes('execute') || lower.includes('deploy') || lower.includes('invest') || lower.includes('buy basket')) &&
+      (lower.includes('basket') || lower.includes('strategy') || lower.includes('portfolio') || lower.includes('suite') || lower === 'execute' || lower === 'deploy');
+
+    if (isExecuteBasketQuery && !lower.includes('swap') && !lower.includes('rotate')) {
+      return Response.json({
+        type: 'INFO',
+        reply: `🚀 **Basket Execution Pipeline Ready**:\n\nTo execute multi-leg basket allocations on BNB Smart Chain:\n1. Verify your allocations in the **Thematic Stock Basket Suite** directly below.\n2. Click **Simulate Safe Allocation** to verify pre-transaction EVM state with **$0 gas risk**.\n3. Click **Execute Allocation on BSC** to broadcast multi-leg swaps via **Binance Agentic Wallet**!\n\n*Or execute single-asset trades in chat by saying e.g. "Buy $5 of NVDA".*`,
+        marketStatus,
+        modelUsed: 'OmniBasket Neuro ⚡'
+      });
+    }
+
+    // 0E. TRADE & ROTATION INTENTS (Reverse Exit to USDT & Stock-to-Stock)
     const isTradeIntent = 
       lower.includes('swap') || lower.includes('rotate') || lower.includes('liquidate') || 
       lower.includes('sell') || lower.includes('convert') || lower.includes('cash out') ||
@@ -67,17 +155,9 @@ export async function POST(req) {
 
     if (isTradeIntent) {
       try {
-        const { stdout: balOut } = await execPromise('baw wallet balance --binanceChainId 56 --json');
-        const balParsed = JSON.parse(balOut);
-        const balList = balParsed.data || [];
-        const usdtToken = balList.find(t => t.address.toLowerCase() === USDT_ADDRESS.toLowerCase());
-        const usdtBal = usdtToken ? parseFloat(usdtToken.balance).toFixed(2) : '0.00';
-
-        const heldStocks = balList.filter(t => 
-          t.address.toLowerCase() !== USDT_ADDRESS.toLowerCase() &&
-          t.address.toLowerCase() !== '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' &&
-          parseFloat(t.balance || 0) > 0.000001
-        );
+        const balList = liveWallet.tokens || [];
+        const usdtBal = liveWallet.usdtBal.toFixed(2);
+        const heldStocks = liveWallet.heldStocks || [];
 
         const pairRegex = /(?:swap|rotate|convert)\s+(?:from\s+|my\s+)?([a-z0-9_]+)\s+(?:to|into|for)\s+([a-z0-9_]+)/i;
         const singleRotateRegex = /(?:rotate|swap|convert)\s+(?:my\s+stock\s+)?(?:to|into)\s+([a-z0-9_]+)/i;
@@ -208,6 +288,12 @@ export async function POST(req) {
       }
     }
 
+    const walletPromptContext = `User's Connected Wallet on BSC (#56):
+- Liquid USDT: $${liveWallet.usdtBal.toFixed(2)} USDT
+- Gas BNB: ${liveWallet.bnbBal.toFixed(4)} BNB
+- Held Equities: ${liveWallet.heldStocks.length > 0 ? liveWallet.heldStocks.map(s => `${s.symbol} (${s.balance})`).join(', ') : 'None (100% liquid USDT)'}
+- Minimum Order Floor: $5.00 USDT per swap on BSC.`;
+
     // 1A. Gemini via OpenRouter
     if (model.startsWith('gemini') && isOpenRouterKey) {
       try {
@@ -226,7 +312,7 @@ export async function POST(req) {
             messages: [
               {
                 role: 'system',
-                content: `You are OmniBasket AI on BNB Smart Chain (BSC #56). Supported tokens: NVDA, AAPL, MSFT, GOOG, TSLA, USDY (5.1% APY Ondo), MAG7X. Output JSON with "reply" (a clear, conversational explanation of your thesis or analysis) and "basket" (optional object with name, description, allocations with ticker & weight summing to 100, or null if purely informational/Q&A). Return ONLY valid JSON.`
+                content: `You are OmniBasket AI on BNB Smart Chain (BSC #56).\n${walletPromptContext}\nSupported tokens: NVDA, AAPL, MSFT, GOOG, TSLA, USDY (5.1% APY Ondo), MAG7X.\n\nAnalyze user intent:\n1. If they ask about wallet balance/portfolio, answer accurately using the wallet data above. Set "basket": null.\n2. If they want a basket or strategy, output JSON with "reply" and "basket" (name, description, allocations with ticker & weight summing to 100).\n3. If they ask to buy a specific token (e.g. NVDA) with USDT, include an "action" object:\n{"type":"EXECUTE_SWAP","mode":"BUY_FROM_USDT","fromTicker":"USDT","toTicker":"<TICKER>","fromQty":"5","estimatedOutput":"~<AMOUNT> <TICKER>","label":"Execute $5 Buy: 5 USDT → <TICKER> on BSC"}\n4. If informational/Q&A, provide a helpful markdown reply and set "basket": null, "action": null.\nReturn ONLY valid JSON.`
               },
               { role: 'user', content: userPrompt }
             ],
@@ -254,8 +340,9 @@ export async function POST(req) {
           }
           const parsed = JSON.parse(cleanContent);
           return Response.json({
-            type: parsed.basket ? 'BASKET_SUGGESTION' : 'INFO',
+            type: parsed.action ? 'TRADE_PROPOSAL' : (parsed.basket ? 'BASKET_SUGGESTION' : 'INFO'),
             reply: parsed.reply,
+            action: parsed.action || null,
             basket: parsed.basket ? {
               id: `gemini-or-${Date.now()}`,
               name: parsed.basket.name || 'Gemini Custom Strategy',
@@ -286,6 +373,7 @@ export async function POST(req) {
                 parts: [
                   {
                     text: `You are OmniBasket AI, an autonomous portfolio agent on BNB Smart Chain (BSC #56).
+${walletPromptContext}
 Supported BSC Tokens:
 - NVDA: NVIDIA Corporation (bStock, 24/7 AMM on BSC)
 - AAPL: Apple Inc. (bStock, 24/7 AMM on BSC)
@@ -297,20 +385,11 @@ Supported BSC Tokens:
 
 User Message: "${userPrompt}"
 
-Analyze user intent. If they want a basket, output JSON with:
-{
-  "reply": "Clear concise explanation of strategy",
-  "basket": {
-    "name": "Strategy Name",
-    "description": "Brief description",
-    "allocations": [
-      {"ticker": "NVDA", "weight": 50},
-      {"ticker": "MSFT", "weight": 50}
-    ]
-  }
-}
-Weights MUST sum to 100.
-If they ask an informational or technical question, provide a concise markdown reply and set "basket": null.
+Analyze user intent:
+1. If the user asks about their balance, portfolio, or holdings, answer directly using the Connected Wallet data above. Set "basket": null.
+2. If they want a basket, output JSON with "reply" and "basket": {"name": "Strategy Name", "description": "Brief description", "allocations": [{"ticker": "NVDA", "weight": 50}, {"ticker": "MSFT", "weight": 50}]}. Weights MUST sum to 100.
+3. If they ask to buy a token with USDT, include "action": {"type":"EXECUTE_SWAP","mode":"BUY_FROM_USDT","fromTicker":"USDT","toTicker":"<TICKER>","fromQty":"5","estimatedOutput":"~<AMOUNT> <TICKER>","label":"Execute $5 Buy: 5 USDT → <TICKER> on BSC"}.
+4. If informational, provide a markdown reply and set "basket": null, "action": null.
 Return ONLY valid JSON.`
                   }
                 ]
@@ -325,8 +404,9 @@ Return ONLY valid JSON.`
         if (text) {
           const parsed = JSON.parse(text);
           return Response.json({
-            type: parsed.basket ? 'BASKET_SUGGESTION' : 'INFO',
+            type: parsed.action ? 'TRADE_PROPOSAL' : (parsed.basket ? 'BASKET_SUGGESTION' : 'INFO'),
             reply: parsed.reply,
+            action: parsed.action || null,
             basket: parsed.basket ? {
               id: `gemini-${Date.now()}`,
               name: parsed.basket.name || 'AI Custom Strategy',
@@ -367,7 +447,7 @@ Return ONLY valid JSON.`
             messages: [
               {
                 role: 'system',
-                content: `You are OmniBasket AI on BNB Smart Chain (BSC #56). Supported tokens: NVDA, AAPL, MSFT, GOOG, TSLA, USDY (5.1% APY Ondo), MAG7X. Output JSON with "reply" and "basket" (name, description, allocations with ticker & weight summing to 100, or null if informational).`
+                content: `You are OmniBasket AI on BNB Smart Chain (BSC #56).\n${walletPromptContext}\nSupported tokens: NVDA, AAPL, MSFT, GOOG, TSLA, USDY (5.1% APY Ondo), MAG7X.\n\nAnalyze user intent:\n1. If they ask about wallet balance/portfolio, answer accurately using the wallet data above. Set "basket": null.\n2. If they want a basket, output JSON with "reply" and "basket" (name, description, allocations with ticker & weight summing to 100).\n3. If they ask to buy a token with USDT, include "action": {"type":"EXECUTE_SWAP","mode":"BUY_FROM_USDT","fromTicker":"USDT","toTicker":"<TICKER>","fromQty":"5","estimatedOutput":"~<AMOUNT> <TICKER>","label":"Execute $5 Buy: 5 USDT → <TICKER> on BSC"}.\n4. If informational, answer in markdown and set "basket": null, "action": null.\nReturn ONLY valid JSON.`
               },
               { role: 'user', content: userPrompt }
             ],
@@ -395,8 +475,9 @@ Return ONLY valid JSON.`
           }
           const parsed = JSON.parse(cleanContent);
           return Response.json({
-            type: parsed.basket ? 'BASKET_SUGGESTION' : 'INFO',
+            type: parsed.action ? 'TRADE_PROPOSAL' : (parsed.basket ? 'BASKET_SUGGESTION' : 'INFO'),
             reply: parsed.reply,
+            action: parsed.action || null,
             basket: parsed.basket ? {
               id: `openai-${Date.now()}`,
               name: parsed.basket.name || 'AI Custom Strategy',
@@ -482,37 +563,42 @@ Return ONLY valid JSON.`
       };
 
       try {
-        const { stdout: balOut } = await execPromise('baw wallet balance --binanceChainId 56 --json');
-        const balParsed = JSON.parse(balOut);
-        const balList = balParsed.data || [];
-        const usdtToken = balList.find(t => t.address.toLowerCase() === USDT_ADDRESS.toLowerCase());
-        const usdtBal = usdtToken ? parseFloat(usdtToken.balance) : 0;
-        const heldStocks = balList.filter(t => 
-          t.address.toLowerCase() !== USDT_ADDRESS.toLowerCase() &&
-          t.address.toLowerCase() !== '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' &&
-          parseFloat(t.balance || 0) > 0.000001
-        );
+        const balList = liveWallet.tokens || [];
+        const usdtBal = liveWallet.usdtBal;
+        const heldStocks = liveWallet.heldStocks || [];
 
         const targetTokenObj = BSC_RWA_TOKENS[ticker];
-        const targetPrice = targetTokenObj?.mockPrice || 140;
+        const REFERENCE_PRICES = {
+          NVDA: 231.20,
+          AAPL: 337.47,
+          MSFT: 536.09,
+          TSLA: 384.12,
+          USDY: 1.16,
+          GOOG: 182.40,
+          MAG7X: 100.00
+        };
+        const targetPrice = REFERENCE_PRICES[ticker] || targetTokenObj?.mockPrice || 140;
 
         // SCENARIO 1: User has >= 4.90 USDT -> Execute Direct Buy from USDT
         if (usdtBal >= 4.90) {
-          const buyAmt = 5.00;
+          const buyAmt = (detectedDepositAmount && detectedDepositAmount >= 5 && detectedDepositAmount <= (usdtBal + 0.1))
+            ? detectedDepositAmount
+            : (usdtBal >= 5 ? 5.00 : usdtBal);
           const estOutput = (buyAmt / targetPrice).toFixed(4);
           return Response.json({
             type: 'TRADE_PROPOSAL',
-            reply: `🎯 **100% ${ticker} Test Allocation Ready**:\n\n• **Order Amount**: **$5.00 USDT** (meets Binance Agentic Wallet $5 minimum)\n• **Target Asset**: **${ticker}** (${targetTokenObj?.name || ticker})\n• **Estimated Output**: **~${estOutput} ${ticker}**\n• **Routing Pipeline**: Direct AMM swap via PancakeSwap & LiquidMesh on BSC #56\n\nClick **Confirm & Execute on BSC** below to broadcast via **Binance Agentic Wallet**!`,
+            reply: `🎯 **100% ${ticker} Allocation Ready**:\n\n• **Order Amount**: **$${buyAmt.toFixed(2)} USDT** (meets Binance Agentic Wallet $5 minimum)\n• **Target Asset**: **${ticker}** (${targetTokenObj?.name || ticker})\n• **Estimated Output**: **~${estOutput} ${ticker}**\n• **Routing Pipeline**: Direct AMM swap via PancakeSwap & LiquidMesh on BSC #56\n\nClick **Confirm & Execute on BSC** below to broadcast via **Binance Agentic Wallet**!`,
             action: {
               type: 'EXECUTE_SWAP',
               mode: 'BUY_FROM_USDT',
               fromTicker: 'USDT',
               toTicker: ticker,
-              fromQty: '5',
+              fromQty: buyAmt.toString(),
               estimatedOutput: `~${estOutput} ${ticker}`,
-              label: `Execute $5 Buy: 5 USDT → ${ticker} on BSC`
+              label: `Execute $${buyAmt.toFixed(0)} Buy: ${buyAmt.toFixed(0)} USDT → ${ticker} on BSC`
             },
             basket: customBasket,
+            depositAmount: buyAmt,
             marketStatus,
             modelUsed: 'OmniBasket Neuro ⚡'
           });
