@@ -3,11 +3,13 @@ export const revalidate = 0;
 
 import { exec } from 'child_process';
 import util from 'util';
+import { ensureBawSession } from '../../../../services/bawSession';
 
 const execPromise = util.promisify(exec);
 
 export async function GET() {
   try {
+    ensureBawSession();
     const { stdout } = await execPromise('baw wallet balance --binanceChainId 56 --json');
     const parsed = JSON.parse(stdout);
 

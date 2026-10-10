@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic';
 import { exec } from 'child_process';
 import util from 'util';
 import { BSC_RWA_TOKENS } from '../../../../services/tokens';
+import { ensureBawSession } from '../../../../services/bawSession';
 
 const execPromise = util.promisify(exec);
 const USDT_ADDRESS = BSC_RWA_TOKENS.USDT.contractAddress;
@@ -28,6 +29,7 @@ async function pollOrder(orderId, maxAttempts = 12, intervalMs = 1200) {
 
 export async function POST(req) {
   try {
+    ensureBawSession();
     const body = await req.json().catch(() => ({}));
     let { fromTicker, toTicker, fromTokenQty } = body;
 

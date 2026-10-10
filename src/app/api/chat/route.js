@@ -2,6 +2,7 @@ import { exec } from 'child_process';
 import util from 'util';
 import { BSC_RWA_TOKENS, PRESET_BASKETS } from '../../../services/tokens';
 import { getMarketHoursStatus } from '../../../services/marketHours';
+import { ensureBawSession } from '../../../services/bawSession';
 
 const execPromise = util.promisify(exec);
 const USDT_ADDRESS = BSC_RWA_TOKENS.USDT.contractAddress;
@@ -28,6 +29,7 @@ function resolveTicker(word) {
 
 export async function POST(req) {
   try {
+    ensureBawSession();
     const { message, model = 'omnibasket-neuro', apiKey } = await req.json();
     const userPrompt = (message || '').trim();
     const lower = userPrompt.toLowerCase();
