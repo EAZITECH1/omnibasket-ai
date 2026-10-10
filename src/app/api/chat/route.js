@@ -161,19 +161,23 @@ export async function POST(req) {
         const usdtBal = liveWallet.usdtBal.toFixed(2);
         const heldStocks = liveWallet.heldStocks || [];
 
-        const pairRegex = /(?:swap|rotate|convert)\s+(?:from\s+|my\s+)?([a-z0-9_]+)\s+(?:to|into|for)\s+([a-z0-9_]+)/i;
-        const singleRotateRegex = /(?:rotate|swap|convert)\s+(?:my\s+stock\s+)?(?:to|into)\s+([a-z0-9_]+)/i;
+        const pairRegex = /(?:swap|rotate|convert|trade|invest|buy)\s+(?:from\s+|all\s+(?:of\s+)?(?:my\s+)?|my\s+)?([a-z0-9_]+)\s+(?:to|into|for|in|with)\s+([a-z0-9_]+)/i;
+        const singleRotateRegex = /(?:rotate|swap|convert)\s+(?:(?:all\s+(?:of\s+)?(?:my\s+)?)?stock\s+)?(?:to|into|for)\s+([a-z0-9_]+)/i;
         const pairMatch = lower.match(pairRegex);
         const singleMatch = lower.match(singleRotateRegex);
 
         let fromWord = pairMatch ? pairMatch[1] : null;
         let toWord = pairMatch ? pairMatch[2] : (singleMatch ? singleMatch[1] : null);
 
-        if (!pairMatch && singleMatch && heldStocks.length > 0) {
-          fromWord = heldStocks[0]?.symbol || 'stock';
+        if (!pairMatch && singleMatch) {
+          if (heldStocks.length > 0) {
+            fromWord = heldStocks[0]?.symbol || 'stock';
+          } else {
+            fromWord = 'usdt';
+          }
         }
 
-        if (!pairMatch && !singleMatch && (lower.includes('usdt') || lower.includes('cash') || lower.includes('liquidate') || lower.includes('sell'))) {
+        if (!pairMatch && !singleMatch && (lower.includes('liquidate') || lower.includes('cash out') || (lower.includes('exit') && lower.includes('usdt')) || (lower.includes('sell') && !lower.includes('buy')))) {
           toWord = 'usdt';
           fromWord = heldStocks[0]?.symbol || 'stock';
         }
@@ -186,10 +190,69 @@ export async function POST(req) {
             if (heldStocks.length > 0) {
               const matchedHeld = heldStocks.find(h => Object.keys(BSC_RWA_TOKENS).some(k => BSC_RWA_TOKENS[k].contractAddress.toLowerCase() === h.address.toLowerCase())) || heldStocks[0];
               fromTicker = Object.keys(BSC_RWA_TOKENS).find(k => BSC_RWA_TOKENS[k].contractAddress.toLowerCase() === matchedHeld.address.toLowerCase()) || matchedHeld.symbol.replace(/on$/i, '');
+            } else {
+              fromTicker = 'USDT';
             }
           }
 
-          // CASE 1: REVERSE EXIT TO USDT (Stock -> USDT)
+          // CASE 1: BUY STOCK FROM USDT (e.g. "Rotate all my USDT to NVDA", "Swap USDT to MSFT")
+          if (fromTicker === 'USDT' && toTicker && toTicker !== 'USDT') {
+            const targetTokenObj = BSC_RWA_TOKENS[toTicker];
+            const REFERENCE_PRICES = {
+              NVDA: 231.20,
+              AAPL: 337.47,
+              MSFT: 536.09,
+              TSLA: 384.12,
+              USDY: 1.16,
+              GOOG: 182.40,
+              MAG7X: 100.00
+            };
+            const targetPrice = REFERENCE_PRICES[toTicker] || targetTokenObj?.mockPrice || 140;
+
+            if (liveWallet.usdtBal < 4.90) {
+              return Response.json({
+                type: 'INFO',
+                reply: `⚠️ **Insufficient USDT Balance**:\n\nYour connected wallet holds **$${liveWallet.usdtBal.toFixed(2)} USDT**.\n\nBinance Agentic Wallet requires a **$5.00 minimum swap size** per trade on BSC. Please deposit at least **$${(5 - liveWallet.usdtBal).toFixed(2)} USDT** to execute this trade on BSC.`,
+                marketStatus,
+                modelUsed: 'OmniBasket Neuro ⚡'
+              });
+            }
+
+            const isAll = lower.includes('all') || lower.includes('entire') || lower.includes('max') || lower.includes('100%');
+            const buyAmt = isAll 
+              ? Math.floor(liveWallet.usdtBal * 100) / 100
+              : ((detectedDepositAmount && detectedDepositAmount >= 5 && detectedDepositAmount <= liveWallet.usdtBal) 
+                  ? detectedDepositAmount 
+                  : (liveWallet.usdtBal >= 5 ? 5.00 : liveWallet.usdtBal));
+
+            const estOutput = (buyAmt / targetPrice).toFixed(4);
+
+            return Response.json({
+              type: 'TRADE_PROPOSAL',
+              reply: `🎯 **USDT to ${toTicker} Allocation Proposal**:\n\n• **Order Amount**: **$${buyAmt.toFixed(2)} USDT** (${isAll ? '100% of liquid balance' : 'meets BSC $5 minimum'})\n• **Target Asset**: **${toTicker}** (${targetTokenObj?.name || toTicker})\n• **Estimated Output**: **~${estOutput} ${toTicker}**\n• **Routing Pipeline**: Direct AMM swap via PancakeSwap & LiquidMesh on BSC #56\n\nClick **Confirm & Execute on BSC** below to broadcast via **Binance Agentic Wallet**!`,
+              action: {
+                type: 'EXECUTE_SWAP',
+                mode: 'BUY_FROM_USDT',
+                fromTicker: 'USDT',
+                toTicker: toTicker,
+                fromQty: buyAmt.toString(),
+                estimatedOutput: `~${estOutput} ${toTicker}`,
+                label: `Execute $${buyAmt.toFixed(2)} Buy: ${buyAmt.toFixed(2)} USDT → ${toTicker} on BSC`
+              },
+              basket: {
+                id: `single-${Date.now()}`,
+                name: `100% ${toTicker} Single-Asset Strategy`,
+                description: `100% allocation to ${toTicker} on BNB Smart Chain`,
+                badge: 'Single Asset · $5 Compatible ⚡',
+                allocations: [{ ticker: toTicker, weight: 100 }]
+              },
+              depositAmount: buyAmt,
+              marketStatus,
+              modelUsed: 'OmniBasket Neuro ⚡'
+            });
+          }
+
+          // CASE 2: REVERSE EXIT TO USDT (Stock -> USDT)
           if (toTicker === 'USDT' || lower.includes('liquidate')) {
             if (heldStocks.length === 0) {
               return Response.json({
