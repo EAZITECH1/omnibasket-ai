@@ -52,6 +52,99 @@ const AVAILABLE_MODELS = [
   }
 ];
 
+function FormattedMessageContent({ content, isUser }) {
+  if (!content) return null;
+
+  const lines = content.split('\n');
+
+  return (
+    <div className="space-y-1.5 leading-relaxed text-xs">
+      {lines.map((line, lIdx) => {
+        const trimmed = line.trim();
+        if (!trimmed) {
+          return <div key={lIdx} className="h-1" />;
+        }
+
+        // Handle ## or ### Headings
+        if (trimmed.startsWith('### ')) {
+          return (
+            <div key={lIdx} className={`text-[11px] font-black uppercase tracking-wider mt-2 mb-1 ${isUser ? 'text-background' : 'text-bnb-yellow'}`}>
+              {trimmed.replace(/^###\s+/, '')}
+            </div>
+          );
+        }
+        if (trimmed.startsWith('## ') || trimmed.startsWith('# ')) {
+          return (
+            <div key={lIdx} className={`text-xs font-black uppercase tracking-wide border-b pb-1 mt-2 mb-1.5 ${isUser ? 'text-background border-background/30' : 'text-foreground border-muted'}`}>
+              {trimmed.replace(/^#+\s+/, '')}
+            </div>
+          );
+        }
+
+        // Handle Bullet Points (*, -, •)
+        const isBullet = trimmed.startsWith('• ') || trimmed.startsWith('- ') || trimmed.startsWith('* ');
+        const textToParse = isBullet ? trimmed.replace(/^[•\-\*]\s+/, '') : trimmed;
+
+        // Parse inline **bold**, *italic*, and `code`
+        const parseInline = (str) => {
+          const parts = [];
+          const regex = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)/g;
+          let lastIdx = 0;
+          let match;
+
+          while ((match = regex.exec(str)) !== null) {
+            if (match.index > lastIdx) {
+              parts.push(str.substring(lastIdx, match.index));
+            }
+            const matchedToken = match[0];
+            if (matchedToken.startsWith('`') && matchedToken.endsWith('`')) {
+              parts.push(
+                <code key={match.index} className={`border px-1 py-0.5 text-[10px] font-mono rounded ${isUser ? 'bg-background/20 border-background/40 text-background' : 'bg-card border-muted text-bnb-yellow'}`}>
+                  {matchedToken.slice(1, -1)}
+                </code>
+              );
+            } else if (matchedToken.startsWith('**') && matchedToken.endsWith('**')) {
+              parts.push(
+                <strong key={match.index} className={`font-black ${isUser ? 'text-background underline' : 'text-foreground font-bold'}`}>
+                  {matchedToken.slice(2, -2)}
+                </strong>
+              );
+            } else if (matchedToken.startsWith('*') && matchedToken.endsWith('*')) {
+              parts.push(
+                <em key={match.index} className={`italic ${isUser ? 'text-background' : 'text-foreground'}`}>
+                  {matchedToken.slice(1, -1)}
+                </em>
+              );
+            }
+            lastIdx = match.index + matchedToken.length;
+          }
+
+          if (lastIdx < str.length) {
+            parts.push(str.substring(lastIdx));
+          }
+
+          return parts.length > 0 ? parts : str;
+        };
+
+        if (isBullet) {
+          return (
+            <div key={lIdx} className="flex items-start gap-1.5 ml-1 my-0.5">
+              <span className={`font-black shrink-0 ${isUser ? 'text-background' : 'text-bnb-yellow'}`}>▸</span>
+              <span className={isUser ? 'text-background' : 'text-foreground'}>{parseInline(textToParse)}</span>
+            </div>
+          );
+        }
+
+        return (
+          <div key={lIdx} className={isUser ? 'text-background' : 'text-foreground'}>
+            {parseInline(textToParse)}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function Home() {
   const [selectedModel, setSelectedModel] = useState('omnibasket-neuro');
   const [customApiKey, setCustomApiKey] = useState('');
@@ -481,7 +574,7 @@ export default function Home() {
                           <span className="text-[8px] border border-muted px-1">{activeModelObj.badge}</span>
                         )}
                       </div>
-                      <div className="whitespace-pre-line leading-relaxed">{m.content}</div>
+                      <FormattedMessageContent content={m.content} isUser={m.role === 'user'} />
                     </div>
                   </div>
                 ))}
