@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" fill="none">
+  <!-- White Brutalist Offset Shadow -->
+  <rect x="8" y="8" width="50" height="50" fill="#FFFFFF"/>
+  <!-- BNB Smart Chain Yellow Box -->
+  <rect x="4" y="4" width="50" height="50" fill="#F0B90B"/>
+  <!-- Center Black Square -->
+  <rect x="20" y="20" width="18" height="18" fill="#000000"/>
+</svg>
