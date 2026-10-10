@@ -120,7 +120,7 @@ All token contracts used in OmniBasket AI are live on **BNB Smart Chain (Chain I
 ### Installation
 ```bash
 # 1. Clone repository
-git clone https://github.com/your-username/omnibasket-ai.git
+git clone https://github.com/EAZITECH1/omnibasket-ai.git
 cd omnibasket-ai
 
 # 2. Install dependencies
@@ -145,6 +145,7 @@ All agent operations are verified on BNB Smart Chain Mainnet:
 
 | Action | Leg | Amount | Status | BscScan Explorer Link |
 |:---|:---|:---|:---|:---|
+| **DEX Market Swap** | `USDT` $\rightarrow$ `NVDAon` | 5.00 USDT $\rightarrow$ 0.02163 NVDAon | `FINISHED` | [`0x75f946b7...`](https://bscscan.com/tx/0x75f946b7b33d7cfae12eae946f5ae9b01df1a0dabf1f22a1eb1ca5bf4ea462b4) |
 | **DEX Market Swap** | `USDT` $\rightarrow$ `WBNB` | 5.50 USDT $\rightarrow$ 0.007377 WBNB | `FINISHED` | [`0xef424e91...`](https://bscscan.com/tx/0xef424e91e3249be77b7d5fd156df7cdd248fb8c9bfff98f9fd1c95e2cc20cc0e) |
 | **DEX Market Swap** | `WBNB` $\rightarrow$ `USDT` | 0.007377 WBNB $\rightarrow$ 5.5030 USDT | `FINISHED` | [`0xcd4566a4...`](https://bscscan.com/tx/0xcd4566a4d1f204b13f524d70a6c7e7329dd48d47c2fb5512d6c2bc8671341461) |
 | **x402 Micropayment** | `USDT` | 0.0100 USDT (EIP-3009) | `FINISHED` | Verified in `baw` x402 sentinel trace |
