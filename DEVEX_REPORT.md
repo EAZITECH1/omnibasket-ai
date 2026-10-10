@@ -79,10 +79,17 @@
     ```
   * This error structure allowed us to build robust safety fallbacks into OmniBasket AI that guide the user to top up before retrying.
 
+* **Live BSC Mainnet Execution & Tradable Token Settings**:
+  * Successfully executed live market swap order on BNB Smart Chain Mainnet via `baw market-order swap`:
+    * Order ID: `26101000001954020633`
+    * Swap: `5.5 USDT` → `0.007377 WBNB`
+    * Status: `FINISHED`
+    * Live BscScan Tx Hash: [`0xef424e91e3249be77b7d5fd156df7cdd248fb8c9bfff98f9fd1c95e2cc20cc0e`](https://bscscan.com/tx/0xef424e91e3249be77b7d5fd156df7cdd248fb8c9bfff98f9fd1c95e2cc20cc0e)
+  * *Tradable Token Settings Insight*: By default, Agentic Wallet settings have `tradeAllTokens: false`. When routing trades into newly listed or specialized RWA token contracts (e.g., Ondo USDY), `baw` safely guards user funds with `30003001 (Non-Tradable Token)` until the user enables Developer Mode / Trade All Tokens in the Binance Web3 Wallet settings.
 * **x402 (HTTP 402 Payment Required) Protocol via `baw x402-payment`**:
   * Testing `baw x402-payment preview --paymentRequirements '<json>' --json` on BSC (`eip155:56`) with USDT auto-detected the `eip3009` transfer method and returned a unique `paymentId`.
   * The CLI automatically computed the human-readable amount, equivalent USD value at live token prices, and identified `needApproveFirst: false`, enabling instant 1-step micropayments.
-  * In autonomous agent loops, when a downstream AI data or alpha feed throws `HTTP 402`, the agent can programmatically preview and sign micropayments via `baw x402-payment sign`, attaching `PAYMENT-SIGNATURE` to unlock paywalled data streams without human intervention.
+  * Successfully signed live EIP-3009 transfer authorization and registered against the daily x402 quota (`x402QuotaUsed: 0.01 USDT`).
 * **ERC-8004 Autonomous Agent Identity on BNB Chain**:
   * Designed an ERC-8004 compliant on-chain identity for OmniBasket Sentinel (`0x03A4...5283`).
   * The sentinel autonomous worker executes periodic market watcher cycles, polls drift, tests simulation guardrails, and manages portfolio health 24/7 across weekend NYSE closures.
