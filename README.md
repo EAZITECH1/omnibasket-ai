@@ -139,7 +139,17 @@ Open [http://localhost:3000](http://localhost:3000) in your browser.
 
 ---
 
-## 🧪 Testing & Verification Suite
+## 🔗 Verified On-Chain Transactions (BSC Mainnet #56)
+
+All agent operations are verified on BNB Smart Chain Mainnet:
+
+| Action | Leg | Amount | Status | BscScan Explorer Link |
+|:---|:---|:---|:---|:---|
+| **DEX Market Swap** | `USDT` $\rightarrow$ `WBNB` | 5.50 USDT $\rightarrow$ 0.007377 WBNB | `FINISHED` | [`0xef424e91...`](https://bscscan.com/tx/0xef424e91e3249be77b7d5fd156df7cdd248fb8c9bfff98f9fd1c95e2cc20cc0e) |
+| **DEX Market Swap** | `WBNB` $\rightarrow$ `USDT` | 0.007377 WBNB $\rightarrow$ 5.5030 USDT | `FINISHED` | [`0xcd4566a4...`](https://bscscan.com/tx/0xcd4566a4d1f204b13f524d70a6c7e7329dd48d47c2fb5512d6c2bc8671341461) |
+| **x402 Micropayment** | `USDT` | 0.0100 USDT (EIP-3009) | `FINISHED` | Verified in `baw` x402 sentinel trace |
+
+---
 
 OmniBasket AI includes standalone diagnostic scripts to verify every subsystem:
 
