@@ -1,3 +1,6 @@
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 import { AGENT_IDENTITY } from '@/agent/agentIdentity';
 import { getMarketHoursStatus } from '@/services/marketHours';
 

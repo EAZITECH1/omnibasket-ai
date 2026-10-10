@@ -26,61 +26,105 @@ export async function POST(req) {
           name: targetToken.name,
           allocatedUsd: legAmountUsd,
           status: 'SKIPPED',
-          message: 'Order size below $5.00 minimum floor'
+          message: `Order size $${legAmountUsd.toFixed(2)} is below $5.00 minimum order floor.`
         });
         continue;
       }
 
-      // Format qty (integer or 2 decimals)
       const qty = legAmountUsd.toFixed(2);
       const cmd = `baw market-order swap --binanceChainId 56 --fromTokenQty ${qty} --fromToken ${USDT_ADDRESS} --toToken ${targetToken.contractAddress} --json`;
 
       try {
-        const { stdout, stderr } = await execPromise(cmd);
+        const { stdout } = await execPromise(cmd);
         const parsed = JSON.parse(stdout);
 
-        results.push({
-          ticker: alloc.ticker,
-          name: targetToken.name,
-          allocatedUsd: legAmountUsd,
-          status: parsed.success ? 'EXECUTED' : 'FAILED',
-          data: parsed
-        });
+        if (parsed.success && parsed.data?.orderId) {
+          const orderId = parsed.data.orderId;
+          
+          // Poll market-order list to resolve terminal status and txHash
+          let finalOrder = null;
+          for (let i = 0; i < 3; i++) {
+            await new Promise(r => setTimeout(r, 1200));
+            try {
+              const listRes = await execPromise('baw market-order list --json');
+              const listParsed = JSON.parse(listRes.stdout);
+              const found = listParsed.data?.list?.find(o => o.orderId === orderId);
+              if (found) {
+                finalOrder = found;
+                if (found.status === 'FINISHED' || found.status === 'FAILED') {
+                  break;
+                }
+              }
+            } catch (_) {}
+          }
+
+          const isFinished = finalOrder?.status === 'FINISHED';
+          const txHash = finalOrder?.txHash || null;
+
+          results.push({
+            ticker: alloc.ticker,
+            name: targetToken.name,
+            allocatedUsd: legAmountUsd,
+            orderId,
+            status: isFinished ? 'EXECUTED' : finalOrder?.status || 'SUBMITTED',
+            txHash,
+            actualTokens: finalOrder?.toTokenActualQty || null,
+            bscScanUrl: txHash ? `https://bscscan.com/tx/${txHash}` : null
+          });
+        } else {
+          results.push({
+            ticker: alloc.ticker,
+            name: targetToken.name,
+            allocatedUsd: legAmountUsd,
+            status: 'FAILED',
+            error: parsed.error || 'Failed to submit order'
+          });
+        }
       } catch (err) {
         let errJson = null;
         try {
-          // Check if stdout contains JSON error from baw
           if (err.stdout) {
             errJson = JSON.parse(err.stdout);
           }
         } catch (_) {}
+
+        const isInsufficient = JSON.stringify(errJson || err.message).includes('insufficient') ||
+                               JSON.stringify(errJson || err.message).includes('30003001');
 
         results.push({
           ticker: alloc.ticker,
           name: targetToken.name,
           allocatedUsd: legAmountUsd,
           status: 'FAILED',
-          error: errJson || { message: err.message }
+          isInsufficient,
+          error: errJson?.error?.message || err.message
         });
       }
     }
 
-    const allSucceeded = results.every(r => r.status === 'EXECUTED');
-    const isInsufficientBalance = results.some(r => 
-      JSON.stringify(r.error || r.data || '').includes('insufficient') ||
-      JSON.stringify(r.error || r.data || '').includes('30003001')
-    );
+    const allSucceeded = results.length > 0 && results.every(r => r.status === 'EXECUTED');
+    const anyExecuted = results.some(r => r.status === 'EXECUTED');
+    const isInsufficient = results.some(r => r.isInsufficient);
+    const skippedCount = results.filter(r => r.status === 'SKIPPED').length;
+
+    let summary = '';
+    if (allSucceeded) {
+      summary = `All ${results.length} basket legs successfully executed on-chain on BNB Smart Chain!`;
+    } else if (anyExecuted) {
+      summary = `Partially executed: ${results.filter(r => r.status === 'EXECUTED').length} legs executed on BSC.`;
+    } else if (isInsufficient) {
+      summary = `Execution halted: Insufficient USDT balance in wallet. Current USDT balance was already allocated or spent in earlier transactions.`;
+    } else if (skippedCount === results.length) {
+      summary = `All legs skipped: Order size per leg was under the $5.00 DEX minimum floor. Increase order size to $20+ for multi-leg execution.`;
+    } else {
+      summary = `Execution could not complete. Review leg details below.`;
+    }
 
     return Response.json({
-      success: allSucceeded,
-      hasExecutionAttempt: true,
-      isInsufficientBalance,
+      success: allSucceeded || anyExecuted,
+      allSucceeded,
       results,
-      summary: isInsufficientBalance
-        ? 'Agentic Wallet triggered BSC order broadcast. Execution halted safely due to 0 USDT test wallet balance. Fund wallet with USDT to settle live.'
-        : allSucceeded
-        ? 'All basket legs executed on-chain via Binance Agentic Wallet!'
-        : 'Execution failed on one or more legs.'
+      summary
     });
   } catch (error) {
     console.error('Execution API error:', error);

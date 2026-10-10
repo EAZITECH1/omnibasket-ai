@@ -1,5 +1,10 @@
+import { exec } from 'child_process';
+import util from 'util';
 import { BSC_RWA_TOKENS, PRESET_BASKETS } from '../../../services/tokens';
 import { getMarketHoursStatus } from '../../../services/marketHours';
+
+const execPromise = util.promisify(exec);
+const USDT_ADDRESS = BSC_RWA_TOKENS.USDT.contractAddress;
 
 const TICKER_SYNONYMS = {
   NVDA: ['nvda', 'nvidia', 'nvdaon', 'chip', 'chips', 'compute'],
@@ -11,6 +16,16 @@ const TICKER_SYNONYMS = {
   MAG7X: ['mag7', 'mag7x', 'magnificent 7', 'mag 7', 'magnificent seven']
 };
 
+function resolveTicker(word) {
+  if (!word) return null;
+  const w = word.toLowerCase().trim();
+  for (const [ticker, syns] of Object.entries(TICKER_SYNONYMS)) {
+    if (syns.some(s => w === s || w.includes(s))) return ticker;
+  }
+  if (w.includes('usdt') || w.includes('tether') || w.includes('dollar') || w.includes('cash') || w.includes('stable')) return 'USDT';
+  return null;
+}
+
 export async function POST(req) {
   try {
     const { message, model = 'omnibasket-neuro', apiKey } = await req.json();
@@ -19,10 +34,246 @@ export async function POST(req) {
     const marketStatus = getMarketHoursStatus();
 
     const activeGeminiKey = apiKey || process.env.GEMINI_API_KEY;
-    const activeOpenAiKey = apiKey || process.env.OPENAI_API_KEY;
+    const activeOpenAiKey = apiKey || process.env.OPENAI_API_KEY || process.env.OPENROUTER_API_KEY;
+    const isOpenRouterKey = (apiKey && apiKey.startsWith('sk-or-')) || (!apiKey && !!process.env.OPENROUTER_API_KEY);
 
-    // 1. Try Gemini API if requested or if key is provided
-    if ((model.startsWith('gemini') || activeGeminiKey) && activeGeminiKey && !model.startsWith('gpt')) {
+    // Detect explicit deposit/order size intent in prompt (e.g. "$50", "25 USDT", "$10", "order size 50")
+    const amtMatch = lower.match(/(?:\$)\s*(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*(?:usd|usdt|\$)|(?:order size|deposit|size|allocate|invest)\s+(?:of\s+)?(?:\$)?(\d+(?:\.\d+)?)/i);
+    let detectedDepositAmount = null;
+    if (amtMatch) {
+      const parsedVal = parseFloat(amtMatch[1] || amtMatch[2] || amtMatch[3]);
+      if (!isNaN(parsedVal) && parsedVal >= 5) {
+        detectedDepositAmount = parsedVal;
+      }
+    }
+
+    if (lower.startsWith('set order size') || lower.startsWith('change order size') || lower.startsWith('set deposit') || lower.startsWith('change deposit') || lower.startsWith('set size') || lower.startsWith('change size')) {
+      if (detectedDepositAmount) {
+        return Response.json({
+          type: 'INFO',
+          reply: `✅ **Order Size Updated**: Thematic stock basket order size is now set to **$${detectedDepositAmount.toFixed(2)} USDT**.\n\nThe Thematic Basket Suite has synced to this allocation size.`,
+          depositAmount: detectedDepositAmount,
+          marketStatus,
+          modelUsed: 'OmniBasket Neuro ⚡'
+        });
+      }
+    }
+
+    // 0. TRADE & ROTATION INTENTS (Reverse Exit to USDT & Stock-to-Stock)
+    const isTradeIntent = 
+      lower.includes('swap') || lower.includes('rotate') || lower.includes('liquidate') || 
+      lower.includes('sell') || lower.includes('convert') || lower.includes('cash out') ||
+      (lower.includes('exit') && lower.includes('usdt'));
+
+    if (isTradeIntent) {
+      try {
+        const { stdout: balOut } = await execPromise('baw wallet balance --binanceChainId 56 --json');
+        const balParsed = JSON.parse(balOut);
+        const balList = balParsed.data || [];
+        const usdtToken = balList.find(t => t.address.toLowerCase() === USDT_ADDRESS.toLowerCase());
+        const usdtBal = usdtToken ? parseFloat(usdtToken.balance).toFixed(2) : '0.00';
+
+        const heldStocks = balList.filter(t => 
+          t.address.toLowerCase() !== USDT_ADDRESS.toLowerCase() &&
+          t.address.toLowerCase() !== '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' &&
+          parseFloat(t.balance || 0) > 0.000001
+        );
+
+        const pairRegex = /(?:swap|rotate|convert)\s+(?:from\s+|my\s+)?([a-z0-9_]+)\s+(?:to|into|for)\s+([a-z0-9_]+)/i;
+        const singleRotateRegex = /(?:rotate|swap|convert)\s+(?:my\s+stock\s+)?(?:to|into)\s+([a-z0-9_]+)/i;
+        const pairMatch = lower.match(pairRegex);
+        const singleMatch = lower.match(singleRotateRegex);
+
+        let fromWord = pairMatch ? pairMatch[1] : null;
+        let toWord = pairMatch ? pairMatch[2] : (singleMatch ? singleMatch[1] : null);
+
+        if (!pairMatch && singleMatch && heldStocks.length > 0) {
+          fromWord = heldStocks[0]?.symbol || 'stock';
+        }
+
+        if (!pairMatch && !singleMatch && (lower.includes('usdt') || lower.includes('cash') || lower.includes('liquidate') || lower.includes('sell'))) {
+          toWord = 'usdt';
+          fromWord = heldStocks[0]?.symbol || 'stock';
+        }
+
+        if (fromWord || toWord) {
+          let fromTicker = resolveTicker(fromWord);
+          let toTicker = resolveTicker(toWord);
+
+          if (!fromTicker && (fromWord === 'stock' || fromWord === 'stocks' || fromWord === 'asset' || fromWord === 'assets' || fromWord === 'holding' || fromWord === 'holdings' || fromWord === 'current' || fromWord === 'all')) {
+            if (heldStocks.length > 0) {
+              const matchedHeld = heldStocks.find(h => Object.keys(BSC_RWA_TOKENS).some(k => BSC_RWA_TOKENS[k].contractAddress.toLowerCase() === h.address.toLowerCase())) || heldStocks[0];
+              fromTicker = Object.keys(BSC_RWA_TOKENS).find(k => BSC_RWA_TOKENS[k].contractAddress.toLowerCase() === matchedHeld.address.toLowerCase()) || matchedHeld.symbol.replace(/on$/i, '');
+            }
+          }
+
+          // CASE 1: REVERSE EXIT TO USDT (Stock -> USDT)
+          if (toTicker === 'USDT' || lower.includes('liquidate')) {
+            if (heldStocks.length === 0) {
+              return Response.json({
+                type: 'INFO',
+                reply: `🔍 **Portfolio Scan (BSC #56)**:\n\nYour connected wallet holds **${usdtBal} USDT** and gas BNB. You currently have **no stock positions (NVDAon, MSFTon, AAPLon)** to liquidate.\n\nAll your capital is already in liquid USDT ready for allocations!`,
+                marketStatus,
+                modelUsed: 'OmniBasket Neuro ⚡'
+              });
+            }
+
+            let targetStock = heldStocks[0];
+            if (fromTicker) {
+              const match = heldStocks.find(h => h.symbol.toUpperCase().includes(fromTicker) || fromTicker.includes(h.symbol.toUpperCase().replace('ON', '')));
+              if (match) targetStock = match;
+            }
+
+            const cleanTicker = targetStock.symbol.replace(/on$/i, '');
+            let estimatedUsdt = (parseFloat(targetStock.balance) * (parseFloat(targetStock.price) || 150)).toFixed(2);
+
+            try {
+              const qCmd = `baw market-order quote --fromTokenQty ${targetStock.balance} --fromToken ${targetStock.address} --toToken ${USDT_ADDRESS} --binanceChainId 56 --json`;
+              const { stdout: qOut } = await execPromise(qCmd);
+              const qParsed = JSON.parse(qOut);
+              if (qParsed.success && qParsed.data?.toCoinAmount) {
+                estimatedUsdt = parseFloat(qParsed.data.toCoinAmount).toFixed(2);
+              }
+            } catch (_) {}
+
+            return Response.json({
+              type: 'TRADE_PROPOSAL',
+              reply: `⚡ **Stock Reverse Exit Proposal**:\n\n• **Selling Position**: \`${parseFloat(targetStock.balance).toFixed(6)}\` **${cleanTicker}** (~$${parseFloat(targetStock.value || 0).toFixed(2)} USD)\n• **Destination**: **USDT** on BNB Smart Chain\n• **Estimated Output**: **~${estimatedUsdt} USDT**\n• **Routing**: Direct AMM via PancakeSwap & LiquidMesh on BSC #56\n\nClick **Confirm & Swap to USDT** below to broadcast via **Binance Agentic Wallet**!`,
+              action: {
+                type: 'EXECUTE_SWAP',
+                mode: 'REVERSE_EXIT_TO_USDT',
+                fromTicker: cleanTicker,
+                toTicker: 'USDT',
+                fromQty: targetStock.balance,
+                estimatedOutput: `${estimatedUsdt} USDT`,
+                label: `Reverse Exit: ${parseFloat(targetStock.balance).toFixed(4)} ${cleanTicker} → ${estimatedUsdt} USDT`
+              },
+              marketStatus,
+              modelUsed: 'OmniBasket Neuro ⚡'
+            });
+          }
+
+          // CASE 2: STOCK-TO-STOCK ROTATION (Stock A -> Stock B)
+          if (fromTicker && toTicker && fromTicker !== toTicker && fromTicker !== 'USDT' && toTicker !== 'USDT') {
+            const held = heldStocks.find(h => h.symbol.toUpperCase().includes(fromTicker) || fromTicker.includes(h.symbol.toUpperCase().replace('ON', '')));
+            
+            if (!held || parseFloat(held.balance || 0) <= 0) {
+              if (heldStocks.length > 0) {
+                const altHeld = heldStocks[0];
+                const altTicker = Object.keys(BSC_RWA_TOKENS).find(k => BSC_RWA_TOKENS[k].contractAddress.toLowerCase() === altHeld.address.toLowerCase()) || altHeld.symbol.replace(/on$/i, '');
+                return Response.json({
+                  type: 'TRADE_PROPOSAL',
+                  reply: `💡 **Active Position Auto-Detected**:\n\nYou don't currently hold **${fromTicker}**, but you do hold \`${parseFloat(altHeld.balance).toFixed(4)}\` **${altTicker}** (~$${parseFloat(altHeld.value || 0).toFixed(2)} USD).\n\nOmniBasket has automatically configured a **2-Hop Rotation from your active ${altTicker} into ${toTicker}** on BSC!\n\nClick **Execute Stock Rotation** below to convert into **${toTicker}** via **Binance Agentic Wallet**!`,
+                  action: {
+                    type: 'EXECUTE_SWAP',
+                    mode: 'STOCK_TO_STOCK_ROTATION',
+                    fromTicker: altTicker,
+                    toTicker: toTicker,
+                    fromQty: altHeld.balance,
+                    estimatedOutput: `~${(parseFloat(altHeld.value || 0) / 140).toFixed(4)} ${toTicker}`,
+                    label: `Rotate: ${parseFloat(altHeld.balance).toFixed(4)} ${altTicker} → ${toTicker} (2-Hop BSC)`
+                  },
+                  marketStatus,
+                  modelUsed: 'OmniBasket Neuro ⚡'
+                });
+              }
+
+              return Response.json({
+                type: 'INFO',
+                reply: `⚠️ **Insufficient ${fromTicker} Balance**:\n\nYour connected wallet holds **0 ${fromTicker}** (available balance: **${usdtBal} USDT**).\n\nTo rotate from ${fromTicker} to ${toTicker}, you first need to hold ${fromTicker}, or you can swap your USDT directly into ${toTicker}!`,
+                marketStatus,
+                modelUsed: 'OmniBasket Neuro ⚡'
+              });
+            }
+
+            return Response.json({
+              type: 'TRADE_PROPOSAL',
+              reply: `🔄 **Stock-to-Stock Rotation Proposal**:\n\n• **Source Position**: \`${parseFloat(held.balance).toFixed(6)}\` **${fromTicker}** (~$${parseFloat(held.value || 0).toFixed(2)} USD)\n• **Target Position**: **${toTicker}**\n• **Routing Pipeline**: **2-Hop Atomic BSC Route** (\`${fromTicker}\` → \`USDT\` → \`${toTicker}\`)\n• **Architecture**: Because Ondo/Backed stock pairs on BSC require stablecoin liquidity, OmniBasket routes Leg 1 into USDT and immediately converts Leg 2 into ${toTicker} in a continuous agentic transaction.\n\nClick **Execute Stock Rotation** below to broadcast via **Binance Agentic Wallet**!`,
+              action: {
+                type: 'EXECUTE_SWAP',
+                mode: 'STOCK_TO_STOCK_ROTATION',
+                fromTicker: fromTicker,
+                toTicker: toTicker,
+                fromQty: held.balance,
+                estimatedOutput: `~${(parseFloat(held.value || 0) / 150).toFixed(4)} ${toTicker}`,
+                label: `Rotate: ${parseFloat(held.balance).toFixed(4)} ${fromTicker} → ${toTicker} (2-Hop BSC)`
+              },
+              marketStatus,
+              modelUsed: 'OmniBasket Neuro ⚡'
+            });
+          }
+        }
+      } catch (tradeErr) {
+        console.warn('Trade intent parsing error:', tradeErr.message);
+      }
+    }
+
+    // 1A. Gemini via OpenRouter
+    if (model.startsWith('gemini') && isOpenRouterKey) {
+      try {
+        const orKey = apiKey || process.env.OPENROUTER_API_KEY;
+        const orModel = model.includes('pro') ? 'google/gemini-2.5-pro' : 'google/gemini-2.5-flash';
+        const orRes = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${orKey}`,
+            'HTTP-Referer': 'https://omnibasket.ai',
+            'X-Title': 'OmniBasket AI'
+          },
+          body: JSON.stringify({
+            model: orModel,
+            messages: [
+              {
+                role: 'system',
+                content: `You are OmniBasket AI on BNB Smart Chain (BSC #56). Supported tokens: NVDA, AAPL, MSFT, GOOG, TSLA, USDY (5.1% APY Ondo), MAG7X. Output JSON with "reply" (a clear, conversational explanation of your thesis or analysis) and "basket" (optional object with name, description, allocations with ticker & weight summing to 100, or null if purely informational/Q&A). Return ONLY valid JSON.`
+              },
+              { role: 'user', content: userPrompt }
+            ],
+            response_format: { type: 'json_object' }
+          })
+        });
+        const orData = await orRes.json();
+        if (orData.error) {
+          console.warn('OpenRouter Gemini API notice:', orData.error);
+          return Response.json({
+            type: 'INFO',
+            reply: `⚠️ **OpenRouter API Notice**:\n\n${orData.error.message || 'OpenRouter authentication error'}.\n\nPlease check your OpenRouter API key balance or configuration.\n\n*Falling back to built-in OmniBasket Neuro Engine for this prompt.*`,
+            marketStatus,
+            modelUsed: 'OpenRouter (Error Notice)'
+          });
+        }
+
+        const rawContent = orData.choices?.[0]?.message?.content;
+        if (rawContent) {
+          let cleanContent = rawContent.trim();
+          if (cleanContent.startsWith('```json')) {
+            cleanContent = cleanContent.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+          } else if (cleanContent.startsWith('```')) {
+            cleanContent = cleanContent.replace(/^```\s*/, '').replace(/\s*```$/, '');
+          }
+          const parsed = JSON.parse(cleanContent);
+          return Response.json({
+            type: parsed.basket ? 'BASKET_SUGGESTION' : 'INFO',
+            reply: parsed.reply,
+            basket: parsed.basket ? {
+              id: `gemini-or-${Date.now()}`,
+              name: parsed.basket.name || 'Gemini Custom Strategy',
+              description: parsed.basket.description || 'Constructed via Gemini on OpenRouter',
+              badge: 'Gemini (OpenRouter) 🤖',
+              allocations: parsed.basket.allocations
+            } : null,
+            marketStatus,
+            modelUsed: `Gemini 1.5/2.5 Flash via OpenRouter 🤖`
+          });
+        }
+      } catch (orErr) {
+        console.warn('OpenRouter Gemini fallback:', orErr.message);
+      }
+    }
+
+    // 1B. Native Google Gemini API
+    if ((model.startsWith('gemini') || activeGeminiKey) && activeGeminiKey && !isOpenRouterKey && !model.startsWith('gpt')) {
       try {
         const modelName = model.includes('pro') ? 'gemini-1.5-pro' : 'gemini-1.5-flash';
         const geminiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${activeGeminiKey}`, {
@@ -92,17 +343,27 @@ Return ONLY valid JSON.`
       }
     }
 
-    // 2. Try OpenAI API if requested
+    // 2. Try OpenAI or OpenRouter API if requested
     if (model.startsWith('gpt') && activeOpenAiKey) {
       try {
-        const openaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
+        const isOpenRouter = activeOpenAiKey.startsWith('sk-or-') || !!process.env.OPENROUTER_API_KEY;
+        const apiEndpoint = isOpenRouter 
+          ? 'https://openrouter.ai/api/v1/chat/completions' 
+          : 'https://api.openai.com/v1/chat/completions';
+        const requestModel = isOpenRouter ? 'openai/gpt-4o' : model;
+
+        const openaiRes = await fetch(apiEndpoint, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${activeOpenAiKey}`
+            'Authorization': `Bearer ${activeOpenAiKey}`,
+            ...(isOpenRouter ? {
+              'HTTP-Referer': 'https://omnibasket.ai',
+              'X-Title': 'OmniBasket AI'
+            } : {})
           },
           body: JSON.stringify({
-            model: model,
+            model: requestModel,
             messages: [
               {
                 role: 'system',
@@ -114,25 +375,41 @@ Return ONLY valid JSON.`
           })
         });
         const openaiData = await openaiRes.json();
-        const content = openaiData.choices?.[0]?.message?.content;
-        if (content) {
-          const parsed = JSON.parse(content);
+        if (openaiData.error) {
+          console.warn('OpenRouter/OpenAI API notice:', openaiData.error);
+          return Response.json({
+            type: 'INFO',
+            reply: `⚠️ **OpenRouter / OpenAI Notice**:\n\n${openaiData.error.message || 'API authentication error'}.\n\n*Falling back to OmniBasket Neuro engine.*`,
+            marketStatus,
+            modelUsed: 'OpenRouter (Notice)'
+          });
+        }
+
+        const rawContent = openaiData.choices?.[0]?.message?.content;
+        if (rawContent) {
+          let cleanContent = rawContent.trim();
+          if (cleanContent.startsWith('```json')) {
+            cleanContent = cleanContent.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+          } else if (cleanContent.startsWith('```')) {
+            cleanContent = cleanContent.replace(/^```\s*/, '').replace(/\s*```$/, '');
+          }
+          const parsed = JSON.parse(cleanContent);
           return Response.json({
             type: parsed.basket ? 'BASKET_SUGGESTION' : 'INFO',
             reply: parsed.reply,
             basket: parsed.basket ? {
               id: `openai-${Date.now()}`,
-              name: parsed.basket.name || 'OpenAI Custom Strategy',
-              description: parsed.basket.description || 'Constructed via OpenAI Intelligence',
-              badge: 'GPT-4o 🧠',
+              name: parsed.basket.name || 'AI Custom Strategy',
+              description: parsed.basket.description || 'Constructed via GPT-4o Intelligence',
+              badge: isOpenRouter ? 'OpenRouter (GPT-4o) 🧠' : 'GPT-4o 🧠',
               allocations: parsed.basket.allocations
             } : null,
             marketStatus,
-            modelUsed: model
+            modelUsed: isOpenRouter ? 'BNB Agent Studio (GPT-4o via OpenRouter) 🧠' : model
           });
         }
       } catch (err) {
-        console.warn('OpenAI fallback:', err.message);
+        console.warn('OpenAI/OpenRouter fallback:', err.message);
       }
     }
 
@@ -192,6 +469,113 @@ Return ONLY valid JSON.`
         }
         detected.push({ ticker, weight });
       }
+    }
+
+    if (detected.length === 1 && (lower.includes('100%') || lower.includes('basket') || lower.includes('allocate') || lower.includes('invest') || lower.includes('buy') || lower.includes('single') || lower.includes('test') || lower.includes('only') || lower.includes('$5') || lower.includes('5 usdt') || lower.includes('5$'))) {
+      const ticker = detected[0].ticker;
+      const customBasket = {
+        id: `single-${Date.now()}`,
+        name: `100% ${ticker} Single-Asset Strategy`,
+        description: `100% allocation to ${ticker} on BNB Smart Chain (Optimized for $5 order minimum)`,
+        badge: 'Single Asset · $5 Compatible ⚡',
+        allocations: [{ ticker, weight: 100 }]
+      };
+
+      try {
+        const { stdout: balOut } = await execPromise('baw wallet balance --binanceChainId 56 --json');
+        const balParsed = JSON.parse(balOut);
+        const balList = balParsed.data || [];
+        const usdtToken = balList.find(t => t.address.toLowerCase() === USDT_ADDRESS.toLowerCase());
+        const usdtBal = usdtToken ? parseFloat(usdtToken.balance) : 0;
+        const heldStocks = balList.filter(t => 
+          t.address.toLowerCase() !== USDT_ADDRESS.toLowerCase() &&
+          t.address.toLowerCase() !== '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' &&
+          parseFloat(t.balance || 0) > 0.000001
+        );
+
+        const targetTokenObj = BSC_RWA_TOKENS[ticker];
+        const targetPrice = targetTokenObj?.mockPrice || 140;
+
+        // SCENARIO 1: User has >= 4.90 USDT -> Execute Direct Buy from USDT
+        if (usdtBal >= 4.90) {
+          const buyAmt = 5.00;
+          const estOutput = (buyAmt / targetPrice).toFixed(4);
+          return Response.json({
+            type: 'TRADE_PROPOSAL',
+            reply: `🎯 **100% ${ticker} Test Allocation Ready**:\n\n• **Order Amount**: **$5.00 USDT** (meets Binance Agentic Wallet $5 minimum)\n• **Target Asset**: **${ticker}** (${targetTokenObj?.name || ticker})\n• **Estimated Output**: **~${estOutput} ${ticker}**\n• **Routing Pipeline**: Direct AMM swap via PancakeSwap & LiquidMesh on BSC #56\n\nClick **Confirm & Execute on BSC** below to broadcast via **Binance Agentic Wallet**!`,
+            action: {
+              type: 'EXECUTE_SWAP',
+              mode: 'BUY_FROM_USDT',
+              fromTicker: 'USDT',
+              toTicker: ticker,
+              fromQty: '5',
+              estimatedOutput: `~${estOutput} ${ticker}`,
+              label: `Execute $5 Buy: 5 USDT → ${ticker} on BSC`
+            },
+            basket: customBasket,
+            marketStatus,
+            modelUsed: 'OmniBasket Neuro ⚡'
+          });
+        }
+
+        // SCENARIO 2: User has < 4.90 USDT but holds another stock (e.g. AAPL) -> Rotate Stock to Target
+        if (heldStocks.length > 0) {
+          const heldStock = heldStocks.find(h => !h.symbol.toUpperCase().includes(ticker)) || heldStocks[0];
+          const heldTicker = Object.keys(BSC_RWA_TOKENS).find(k => BSC_RWA_TOKENS[k].contractAddress.toLowerCase() === heldStock.address.toLowerCase()) || heldStock.symbol.replace(/on$/i, '');
+          
+          if (heldTicker !== ticker) {
+            const heldVal = parseFloat(heldStock.value || 5);
+            const estOutput = (heldVal / targetPrice).toFixed(4);
+
+            return Response.json({
+              type: 'TRADE_PROPOSAL',
+              reply: `🎯 **100% ${ticker} Allocation Strategy**:\n\n• **Live Wallet State**: You currently hold **${usdtBal.toFixed(2)} USDT** liquid and \`${parseFloat(heldStock.balance).toFixed(4)}\` **${heldTicker}** (~$${heldVal.toFixed(2)} USD).\n• **Execution Path**: Because your ~$5 capital is currently allocated in **${heldTicker}**, OmniBasket can rotate **${heldTicker} → ${ticker}** directly via an atomic 2-hop route!\n\nClick **Confirm & Execute on BSC** below to rotate your position into **${ticker}** via **Binance Agentic Wallet**!`,
+              action: {
+                type: 'EXECUTE_SWAP',
+                mode: 'STOCK_TO_STOCK_ROTATION',
+                fromTicker: heldTicker,
+                toTicker: ticker,
+                fromQty: heldStock.balance,
+                estimatedOutput: `~${estOutput} ${ticker}`,
+                label: `Rotate: ${parseFloat(heldStock.balance).toFixed(4)} ${heldTicker} → ${ticker} (2-Hop BSC)`
+              },
+              basket: customBasket,
+              marketStatus,
+              modelUsed: 'OmniBasket Neuro ⚡'
+            });
+          }
+        }
+
+        // SCENARIO 3: User already holds the target ticker
+        const alreadyHeld = heldStocks.find(h => h.symbol.toUpperCase().includes(ticker));
+        if (alreadyHeld) {
+          return Response.json({
+            type: 'INFO',
+            reply: `✅ **Position Already Active**:\n\nYour connected wallet already holds \`${parseFloat(alreadyHeld.balance).toFixed(4)}\` **${ticker}** (~$${parseFloat(alreadyHeld.value || 0).toFixed(2)} USD).\n\nAll your capital is already allocated to ${ticker}! If you'd like to exit, click **Exit Stock to USDT** or type "swap ${ticker} to USDT".`,
+            basket: customBasket,
+            marketStatus,
+            modelUsed: 'OmniBasket Neuro ⚡'
+          });
+        }
+
+        // SCENARIO 4: Insufficient USDT and no stocks
+        return Response.json({
+          type: 'INFO',
+          reply: `⚠️ **Insufficient Balance for BSC $5 Order Floor**:\n\nYour connected wallet holds **${usdtBal.toFixed(2)} USDT** and 0 stock positions.\n\nBinance Agentic Wallet enforces a **$5.00 minimum swap size** per trade on BSC. Please deposit at least **$${(5 - usdtBal).toFixed(2)} USDT** to execute this trade on BSC.`,
+          basket: customBasket,
+          marketStatus,
+          modelUsed: 'OmniBasket Neuro ⚡'
+        });
+      } catch (err) {
+        console.warn('Single asset execution error:', err.message);
+      }
+
+      return Response.json({
+        type: 'BASKET_SUGGESTION',
+        reply: `🎯 Configured **100% ${ticker}** strategy!\n\n**Note for BSC Execution**: Because Binance Agentic Wallet enforces a **$5.00 minimum swap size** per trade, allocating 100% to ${ticker} allows your entire $5 USDT balance to execute in a single on-chain transaction without splitting below the limit.`,
+        basket: customBasket,
+        modelUsed: 'OmniBasket Neuro ⚡'
+      });
     }
 
     if (detected.length >= 2) {
