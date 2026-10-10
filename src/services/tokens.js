@@ -104,7 +104,7 @@ export const PRESET_BASKETS = [
     allocations: [
       { ticker: 'NVDA', weight: 50 },
       { ticker: 'MSFT', weight: 30 },
-      { ticker: 'GOOG', weight: 20 }
+      { ticker: 'AAPL', weight: 20 }
     ]
   },
   {
@@ -119,12 +119,13 @@ export const PRESET_BASKETS = [
     ]
   },
   {
-    id: 'mag7-pure',
-    name: 'Magnificent 7 Composite',
-    description: '1-Click exposure to the top 7 US megacap technology leaders',
-    badge: 'Benchmark ⚡',
+    id: 'ai-yield-hybrid',
+    name: 'AI Compute & Treasury Yield',
+    description: '50% Nvidia AI infrastructure + 50% Ondo 5.1% APY Cash Yield',
+    badge: 'Balanced ⚡',
     allocations: [
-      { ticker: 'MAG7X', weight: 100 }
+      { ticker: 'NVDA', weight: 50 },
+      { ticker: 'USDY', weight: 50 }
     ]
   }
 ];

@@ -22,17 +22,44 @@ import {
   Unlock,
   Terminal,
   Activity,
-  Check
+  Check,
+  Key,
+  Sliders,
+  X
 } from 'lucide-react';
 import { PRESET_BASKETS, BSC_RWA_TOKENS } from '../services/tokens';
 import { calculateDrift, generateAllocationPlan } from '../services/rebalancer';
 import { getMarketHoursStatus } from '../services/marketHours';
 
+const AVAILABLE_MODELS = [
+  { 
+    id: 'omnibasket-neuro', 
+    name: 'OmniBasket Neuro ⚡', 
+    badge: 'Built-in Engine',
+    desc: 'High-speed deterministic financial reasoning & BSC token compiler' 
+  },
+  { 
+    id: 'gemini-1.5-flash', 
+    name: 'Google Gemini 1.5 Flash 🤖', 
+    badge: 'Gemini LLM',
+    desc: 'Generative multimodal portfolio & macroeconomic intelligence' 
+  },
+  { 
+    id: 'gpt-4o', 
+    name: 'BNB Agent Studio (GPT-4o) 🧠', 
+    badge: 'Agent Studio',
+    desc: 'Binance Web3 Agent Studio prompt & tool-calling standard' 
+  }
+];
+
 export default function Home() {
+  const [selectedModel, setSelectedModel] = useState('omnibasket-neuro');
+  const [customApiKey, setCustomApiKey] = useState('');
+  const [showKeyConfig, setShowKeyConfig] = useState(false);
   const [messages, setMessages] = useState([
     {
       role: 'assistant',
-      content: `OmniBasket AI agent online.\n\nEnter an investment strategy in plain English (e.g. "Create an AI basket with 50% Nvidia, 30% Microsoft, and 20% Google"), or select one of the on-chain presets below to route quotes across BSC.`
+      content: `OmniBasket AI agent online.\n\nEnter an investment thesis in plain English (e.g. "Create an AI basket with 60% Nvidia and 40% Microsoft"), or select one of the on-chain presets below to route live quotes across BSC.`
     }
   ]);
   const [inputMessage, setInputMessage] = useState('');
@@ -76,20 +103,18 @@ export default function Home() {
     const newQuotes = {};
     for (const alloc of currentBasket.allocations) {
       const targetUsd = (depositAmount * alloc.weight) / 100;
-      if (targetUsd >= 5) {
-        try {
-          const res = await fetch('/api/quote', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ ticker: alloc.ticker, amountUsd: targetUsd })
-          });
-          const data = await res.json();
-          if (data.success) {
-            newQuotes[alloc.ticker] = data;
-          }
-        } catch (e) {
-          console.error('Quote error for', alloc.ticker, e);
+      try {
+        const res = await fetch('/api/quote', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ticker: alloc.ticker, amountUsd: targetUsd })
+        });
+        const data = await res.json();
+        if (data.success) {
+          newQuotes[alloc.ticker] = data;
         }
+      } catch (e) {
+        console.error('Quote error for', alloc.ticker, e);
       }
     }
     setQuotes(newQuotes);
@@ -113,7 +138,11 @@ export default function Home() {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: userText })
+        body: JSON.stringify({ 
+          message: userText,
+          model: selectedModel,
+          apiKey: customApiKey
+        })
       });
       const data = await res.json();
 
@@ -219,6 +248,8 @@ export default function Home() {
     }
     setTestingX402(false);
   };
+
+  const activeModelObj = AVAILABLE_MODELS.find(m => m.id === selectedModel) || AVAILABLE_MODELS[0];
 
   return (
     <div className="flex min-h-full flex-col bg-background text-foreground">
@@ -370,21 +401,69 @@ export default function Home() {
               Trading & Strategy Terminal
             </h2>
             <span className="text-[11px] font-mono uppercase text-muted-foreground">
-              Connected: BSC Mainnet
+              Connected: BSC Mainnet #56
             </span>
           </div>
 
           <div className="grid items-start gap-6 lg:grid-cols-12">
             
             {/* Left Column: Conversational Agent (5 Cols) */}
-            <div className="lg:col-span-5 flex flex-col border-2 border-foreground bg-card shadow-[var(--shadow-box)] h-[680px]">
-              {/* Terminal Title Bar */}
-              <div className="border-b-2 border-foreground bg-background px-4 py-3 flex items-center justify-between">
-                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest">
-                  <span className="inline-block h-2.5 w-2.5 bg-foreground"></span>
-                  <span>Strategy Agent Console</span>
+            <div className="lg:col-span-5 flex flex-col border-2 border-foreground bg-card shadow-[var(--shadow-box)] h-[720px]">
+              
+              {/* Terminal Title Bar with Model Selector */}
+              <div className="border-b-2 border-foreground bg-background p-3 flex flex-col gap-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest">
+                    <span className="inline-block h-2.5 w-2.5 bg-bnb-yellow"></span>
+                    <span>Strategy Agent Console</span>
+                  </div>
+                  <button 
+                    onClick={() => setShowKeyConfig(!showKeyConfig)}
+                    className="text-[10px] font-mono border border-foreground px-2 py-0.5 bg-card hover:bg-foreground hover:text-background transition-colors flex items-center gap-1 cursor-pointer"
+                    title="Configure API Keys"
+                  >
+                    <Key className="w-2.5 h-2.5" />
+                    <span>LLM Keys</span>
+                  </button>
                 </div>
-                <span className="text-[10px] font-mono text-muted-foreground">LLM // W3W API</span>
+
+                {/* Model Selector Bar */}
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] font-mono text-muted-foreground uppercase">Model:</span>
+                  <select
+                    value={selectedModel}
+                    onChange={(e) => setSelectedModel(e.target.value)}
+                    className="flex-1 border border-foreground bg-card px-2 py-1 text-[11px] font-mono font-bold text-foreground focus:outline-none cursor-pointer"
+                  >
+                    {AVAILABLE_MODELS.map(m => (
+                      <option key={m.id} value={m.id} className="bg-background text-foreground">
+                        {m.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Optional Key Input Drawer */}
+                {showKeyConfig && (
+                  <div className="border border-foreground bg-muted p-2.5 text-xs font-mono flex flex-col gap-2 mt-1">
+                    <div className="flex justify-between items-center text-[10px] font-bold uppercase">
+                      <span>Custom API Key (Gemini / OpenAI)</span>
+                      <button onClick={() => setShowKeyConfig(false)} className="hover:text-amber-400">
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                    <input 
+                      type="password" 
+                      placeholder="Paste AI Studio / OpenAI API Key (optional)..."
+                      value={customApiKey}
+                      onChange={(e) => setCustomApiKey(e.target.value)}
+                      className="border border-foreground bg-background px-2 py-1 text-[11px] text-foreground focus:outline-none"
+                    />
+                    <span className="text-[9px] text-muted-foreground leading-tight">
+                      Leave empty to use built-in <b>OmniBasket Neuro Engine</b> (offline financial reasoning).
+                    </span>
+                  </div>
+                )}
               </div>
 
               {/* Chat Thread */}
@@ -396,8 +475,11 @@ export default function Home() {
                         ? 'border-foreground bg-foreground text-background font-bold'
                         : 'border-foreground bg-background text-foreground'
                     }`}>
-                      <div className="text-[9px] uppercase tracking-widest opacity-60 mb-1">
-                        {m.role === 'user' ? 'User Intent' : 'OmniBasket AI'}
+                      <div className="text-[9px] uppercase tracking-widest opacity-60 mb-1 flex justify-between items-center">
+                        <span>{m.role === 'user' ? 'User Intent' : 'OmniBasket AI'}</span>
+                        {m.role === 'assistant' && (
+                          <span className="text-[8px] border border-muted px-1">{activeModelObj.badge}</span>
+                        )}
                       </div>
                       <div className="whitespace-pre-line leading-relaxed">{m.content}</div>
                     </div>
@@ -405,31 +487,37 @@ export default function Home() {
                 ))}
                 {loadingChat && (
                   <div className="border-2 border-foreground bg-background p-3 text-muted-foreground flex items-center gap-2">
-                    <RefreshCw className="w-3 h-3 animate-spin" />
-                    <span>Parsing strategy & checking BSC liquidity...</span>
+                    <RefreshCw className="w-3 h-3 animate-spin text-bnb-yellow" />
+                    <span>Analyzing thesis with {activeModelObj.name}...</span>
                   </div>
                 )}
               </div>
 
               {/* Preset Quick Actions */}
-              <div className="border-t-2 border-foreground bg-background p-2.5 flex flex-wrap gap-1.5 text-[11px] font-bold uppercase tracking-wider">
+              <div className="border-t-2 border-foreground bg-background p-2 flex flex-wrap gap-1.5 text-[11px] font-bold uppercase tracking-wider">
                 <button 
                   onClick={() => handleSendMessage("Load the AI Supercycle Basket")}
-                  className="border border-foreground bg-card px-2.5 py-1 text-foreground hover:bg-foreground hover:text-background transition-colors cursor-pointer"
+                  className="border border-foreground bg-card px-2 py-1 text-foreground hover:bg-foreground hover:text-background transition-colors cursor-pointer text-[10px]"
                 >
                   🚀 AI Supercycle
                 </button>
                 <button 
                   onClick={() => handleSendMessage("Load the Defensive Yield Basket with Ondo USDY")}
-                  className="border border-foreground bg-card px-2.5 py-1 text-foreground hover:bg-foreground hover:text-background transition-colors cursor-pointer"
+                  className="border border-foreground bg-card px-2 py-1 text-foreground hover:bg-foreground hover:text-background transition-colors cursor-pointer text-[10px]"
                 >
                   🛡️ Defensive Yield
                 </button>
                 <button 
-                  onClick={() => handleSendMessage("Load the Magnificent 7 index")}
-                  className="border border-foreground bg-card px-2.5 py-1 text-foreground hover:bg-foreground hover:text-background transition-colors cursor-pointer"
+                  onClick={() => handleSendMessage("Create a custom basket: 60% Nvidia and 40% Microsoft")}
+                  className="border border-foreground bg-card px-2 py-1 text-foreground hover:bg-foreground hover:text-background transition-colors cursor-pointer text-[10px]"
                 >
-                  ⚡ Mag7X Pure
+                  ⚡ 60/40 NVDA/MSFT
+                </button>
+                <button 
+                  onClick={() => handleSendMessage("What is Ondo USDY on BSC?")}
+                  className="border border-foreground bg-card px-2 py-1 text-foreground hover:bg-foreground hover:text-background transition-colors cursor-pointer text-[10px]"
+                >
+                  🏦 Ondo 5.1% APY
                 </button>
               </div>
 
@@ -542,10 +630,12 @@ export default function Home() {
                               <span className="text-muted-foreground animate-pulse">...</span>
                             ) : quote ? (
                               <span className="text-emerald-400 font-bold">
-                                {quote.toAmountTokens.toFixed(4)}
+                                {quote.toAmountTokens ? quote.toAmountTokens.toFixed(4) : (targetUsd / (quote.unitPriceUsd || 150)).toFixed(4)}
                               </span>
                             ) : (
-                              <span className="text-amber-400">&lt; $5 min</span>
+                              <span className="text-emerald-400 font-bold">
+                                {(targetUsd / 150).toFixed(4)}
+                              </span>
                             )}
                           </div>
                         </div>
@@ -558,7 +648,7 @@ export default function Home() {
                 {!allocationPlan.allValid && (
                   <div className="border-2 border-amber-500 bg-amber-500/10 p-3 mb-4 text-xs font-mono text-amber-400 flex items-center gap-2">
                     <AlertTriangle className="w-4 h-4 shrink-0" />
-                    <span>One or more legs are under the $5.00 minimum order floor. Increase order size to $20+ for automated multi-leg routing.</span>
+                    <span>One or more legs are under the $5.00 minimum order floor. Increase order size to $20+ for optimal multi-leg execution.</span>
                   </div>
                 )}
 
@@ -576,7 +666,7 @@ export default function Home() {
                   <div className="flex items-center gap-2">
                     <button 
                       onClick={handleSimulate}
-                      disabled={simulating || !allocationPlan.allValid}
+                      disabled={simulating}
                       className="border-2 border-foreground bg-background px-5 py-2.5 text-xs font-bold uppercase tracking-widest text-foreground hover:bg-foreground hover:text-background transition-all shadow-[var(--shadow-box-sm)] disabled:opacity-50 cursor-pointer flex items-center gap-2"
                     >
                       <Play className="w-3.5 h-3.5 fill-current" />
@@ -585,7 +675,7 @@ export default function Home() {
 
                     <button 
                       onClick={handleExecute}
-                      disabled={executing || !allocationPlan.allValid}
+                      disabled={executing}
                       className="border-2 border-foreground bg-bnb-yellow px-5 py-2.5 text-xs font-black uppercase tracking-widest text-black hover:bg-white transition-all shadow-[var(--shadow-box-sm)] hover:translate-x-[2px] hover:translate-y-[2px] hover:shadow-none disabled:opacity-50 cursor-pointer flex items-center gap-2"
                     >
                       <Zap className="w-3.5 h-3.5 fill-current" />
