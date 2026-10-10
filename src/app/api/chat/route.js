@@ -74,7 +74,7 @@ export async function POST(req) {
     // 0A. WALLET BALANCE & PORTFOLIO INQUIRIES
     const isBalanceOrPortfolioQuery = 
       (lower.includes('balance') || lower.includes('portfolio') || lower.includes('holding') || lower.includes('what do i own') || lower.includes('what do i have') || lower.includes('how much money') || lower.includes('how much usdt') || lower.includes('my wallet') || lower.includes('positions') || lower.includes('what tokens')) &&
-      !lower.includes('sell') && !lower.includes('swap') && !lower.includes('rotate') && !lower.includes('liquidate') && !lower.includes('convert');
+      !lower.includes('sell') && !lower.includes('swap') && !lower.includes('rotate') && !lower.includes('liquidate') && !lower.includes('convert') && !lower.includes('rebalance') && !lower.includes('drift');
 
     if (isBalanceOrPortfolioQuery) {
       const stockSummary = liveWallet.heldStocks.length > 0
