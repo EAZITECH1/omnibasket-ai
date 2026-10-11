@@ -472,8 +472,56 @@ export default function UnifiedStrategyBasket() {
     }
 
     if (walletMode === 'agentic') {
-      alert('Agentic Wallet execution is disabled in public mode. Please switch to Binance Web3 Wallet Extension mode to execute with your browser wallet.');
-      return;
+      if (!address) {
+        openModal();
+        return;
+      }
+
+      setExecutingSwap(true);
+      setActiveActionIdx(actionMsgIdx);
+
+      try {
+        const fromAmount = action.fromQty || 10;
+        const toTicker = action.toTicker;
+
+        const execRes = await fetch('/api/agentic-wallet/execute-basket', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            prompt: `Swap ${fromAmount} USDT to ${toTicker}`,
+            investmentAmount: fromAmount,
+            allocations: [{ ticker: toTicker, weight: 100 }],
+            chainId: 56
+          })
+        });
+
+        const execData = await execRes.json();
+        setExecutingSwap(false);
+
+        if (!execData.success) {
+          throw new Error(execData.message || 'Agentic swap execution failed.');
+        }
+
+        const acquired = execData.allocations?.[0];
+        triggerSyncNotice(`Swap completed via Binance Agentic Wallet!`);
+        window.dispatchEvent(new Event('omnibasket-balance-refresh'));
+        refreshBalances();
+        fetchQuotes();
+
+        setMessages(prev => [
+          ...prev,
+          {
+            role: 'assistant',
+            content: `✅ **Swap Executed via Binance Agentic Wallet!**\n\n• Swapped **$${fromAmount} USDT** for **${toTicker}**\n• Transaction: ${acquired?.txHash ? `[${acquired.txHash.slice(0, 10)}...](https://bscscan.com/tx/${acquired.txHash})` : 'Confirmed'}\n\nExecuted under strict 0.5% slippage protection.`,
+            modelUsed: 'Binance Agentic Wallet MPC ⚡'
+          }
+        ]);
+        return;
+      } catch (err) {
+        setExecutingSwap(false);
+        alert(`Agentic swap failed: ${err.message}`);
+        return;
+      }
     }
 
     setExecutingSwap(true);
@@ -801,8 +849,84 @@ export default function UnifiedStrategyBasket() {
     }
 
     if (walletMode === 'agentic') {
-      alert('Agentic Wallet execution is disabled in public mode. Please switch to Binance Web3 Wallet Extension mode to execute with your browser wallet.');
-      return;
+      if (!address) {
+        openModal();
+        return;
+      }
+
+      const confirmMsg = `Broadcast autonomous multi-leg allocation of $${depositAmount} USDT on BNB Smart Chain via paired Binance Agentic Wallet (${address.slice(0, 6)}...${address.slice(-4)})?\n\nStrategy: ${selectedBasket.name}\nDeposit: $${depositAmount} USDT\n\nExecution is protected under strict guardrails (0.5% max slippage, $50,000 quota limit).`;
+
+      if (!confirm(confirmMsg)) {
+        return;
+      }
+
+      setExecutingBasket(true);
+      setExecutionResult(null);
+
+      try {
+        const execRes = await fetch('/api/agentic-wallet/execute-basket', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            prompt: selectedBasket.name,
+            investmentAmount: depositAmount,
+            allocations: selectedBasket.allocations,
+            chainId: 56
+          })
+        });
+
+        const execData = await execRes.json();
+        setExecutingBasket(false);
+
+        if (!execData.success) {
+          setExecutionResult({
+            success: false,
+            summary: execData.message || 'Agentic Wallet execution rejected by guardrails.',
+            results: execData.errors?.map(err => ({ ticker: 'Error', error: err, success: false })) || []
+          });
+          return;
+        }
+
+        const acquired = execData.allocations || [];
+        setExecutionResult({
+          success: true,
+          summary: execData.summary || `Executed ${acquired.length} swaps via Binance Agentic Wallet`,
+          results: acquired.map(a => ({
+            ticker: a.ticker,
+            name: a.name,
+            success: true,
+            txHash: a.txHash,
+            bscScanUrl: `https://bscscan.com/tx/${a.txHash}`
+          }))
+        });
+
+        triggerSyncNotice('Agentic basket execution completed on BSC!');
+        window.dispatchEvent(new Event('omnibasket-balance-refresh'));
+        refreshBalances();
+        fetchQuotes();
+
+        const legSummaries = acquired
+          .map(a => `• **${a.ticker}**: ${a.txHash ? `[${a.txHash.slice(0, 10)}...${a.txHash.slice(-8)}](https://bscscan.com/tx/${a.txHash})` : 'Confirmed'} ✅ ($${a.allocatedUsdt} USDT)`)
+          .join('\n');
+
+        setMessages(prev => [
+          ...prev,
+          {
+            role: 'assistant',
+            content: `✅ **Autonomous Multi-Leg Allocation COMPLETED via Binance Agentic Wallet!**\n\n• **Strategy**: **${selectedBasket.name}**\n• **Capital Allocated**: **$${depositAmount} USDT**\n\n**Transactions:**\n${legSummaries}\n\nConfirmed tokens are held in your keyless Binance MPC Wallet on BSC.`,
+            modelUsed: 'Binance Agentic Wallet MPC ⚡'
+          }
+        ]);
+        return;
+      } catch (agentErr) {
+        setExecutingBasket(false);
+        setExecutionResult({
+          success: false,
+          summary: `Agentic execution error: ${agentErr.message}`,
+          results: []
+        });
+        return;
+      }
     }
 
     const confirmMsg = `Broadcast multi-leg allocation of $${depositAmount} USDT on BNB Smart Chain via Binance Web3 Wallet (${address.slice(0, 6)}...${address.slice(-4)})?\n\nStrategy: ${selectedBasket.name}\nDeposit: $${depositAmount} USDT\n\nEach leg will simulate on-chain, display exact slippage protection, and request your approval and signature.`;

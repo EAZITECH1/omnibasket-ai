@@ -1148,6 +1148,213 @@ async function runOfflineUnitTests() {
     assert(excessWeightResult.success === false, 'executeBasket rejects excessive total weights (> 100%)');
     assert(excessWeightResult.blockedAt === 'VALIDATION', 'Blocked at VALIDATION boundary for excessive weight');
   }
+
+  // --------------------------------------------------------------------------
+  // TEST GROUP 9: Per-User Binance Agentic Wallet Connection & Multi-Tenant Isolation Suite
+  // --------------------------------------------------------------------------
+  console.log('\nTest Group 9: Per-User Binance Agentic Wallet Connection & Multi-Tenant Isolation Suite');
+  const { GET: agenticStatusHandler } = await import('./app/api/agentic-wallet/status/route.js');
+  const { GET: agenticSettingsHandler } = await import('./app/api/agentic-wallet/settings/route.js');
+  const { GET: agenticBalanceHandler } = await import('./app/api/agentic-wallet/balance/route.js');
+  const { POST: agenticSigninHandler } = await import('./app/api/agentic-wallet/auth/signin/route.js');
+  const { GET: agenticPairStatusHandler } = await import('./app/api/agentic-wallet/auth/status/route.js');
+  const { POST: agenticConfirmHandler } = await import('./app/api/agentic-wallet/auth/confirm-agent/route.js');
+  const { POST: agenticSignoutHandler } = await import('./app/api/agentic-wallet/auth/signout/route.js');
+  const { POST: agenticExecuteHandler } = await import('./app/api/agentic-wallet/execute-basket/route.js');
+  const { confirmAgentSignin, getOrCreateUserSession } = await import('./services/userBawSessionManager.js');
+
+  // 9.1: Unconnected visitor status
+  {
+    const req = new Request('http://localhost/api/agentic-wallet/status');
+    const res = await agenticStatusHandler(req);
+    const data = await res.json();
+    assert(data.success === true, '/api/agentic-wallet/status returns success: true');
+    assert(data.data.connected === false, 'Unconnected visitor reports connected: false');
+    assert(data.data.status === 'UNCONNECTED', 'Unconnected visitor reports status: UNCONNECTED');
+    assert(data.data.address === null, 'Unconnected visitor never sees a shared server address');
+  }
+
+  // 9.2: Auth signin generates isolated session & QR info
+  let userASessionId = null;
+  let userAQrId = null;
+  let userAPairingCode = null;
+  {
+    const req = new Request('http://localhost/api/agentic-wallet/auth/signin', { method: 'POST' });
+    const res = await agenticSigninHandler(req);
+    const data = await res.json();
+    assert(data.success === true, '/api/agentic-wallet/auth/signin returns success: true');
+    assert(Boolean(data.sessionId), 'Signin returns unique sessionId');
+    assert(Boolean(data.data.qrCodeId), 'Signin returns qrCodeId');
+    assert(Boolean(data.data.urlForWeb), 'Signin returns urlForWeb');
+    assert(Boolean(data.data.pairingCode), 'Signin returns 6-character pairingCode');
+    assert(data.data.pairingCode.length === 6, 'Pairing code is strictly 6 characters');
+    assert(Boolean(data.data.qrSvg), 'Signin generates crisp SVG QR code');
+
+    const setCookie = res.headers.get('set-cookie');
+    assert(Boolean(setCookie && setCookie.includes('omnibasket_baw_sid=')), 'Signin sets HTTP-only session cookie');
+
+    userASessionId = data.sessionId;
+    userAQrId = data.data.qrCodeId;
+    userAPairingCode = data.data.pairingCode;
+  }
+
+  // 9.3: Listener status query for User A
+  {
+    const req = new Request(`http://localhost/api/agentic-wallet/auth/status?qrCodeId=${userAQrId}`, {
+      headers: { 'x-baw-session-id': userASessionId }
+    });
+    const res = await agenticPairStatusHandler(req);
+    const data = await res.json();
+    assert(data.success === true, 'Listener status check returns success: true');
+    assert(data.data.qrCodeId === userAQrId, 'Listener returns matching qrCodeId');
+    assert(data.data.pairingCode === userAPairingCode, 'Listener returns matching pairingCode');
+  }
+
+  // 9.4: Agent confirmation completes pairing for User A
+  const mockUserAAddress = '0x1111111111111111111111111111111111111111';
+  {
+    // Simulate mobile app authorization populating address
+    const sessionA = getOrCreateUserSession(userASessionId);
+    sessionA.walletAddress = mockUserAAddress;
+
+    const req = new Request('http://localhost/api/agentic-wallet/auth/confirm-agent', {
+      method: 'POST',
+      headers: { 
+        'Content-Type': 'application/json',
+        'x-baw-session-id': userASessionId 
+      },
+      body: JSON.stringify({ qrCodeId: userAQrId })
+    });
+    const res = await agenticConfirmHandler(req);
+    const data = await res.json();
+    assert(data.success === true, 'Agent confirmation returns success: true');
+    assert(data.data.status === 'CONNECTED', 'Agent confirmation marks status as CONNECTED');
+    assert(data.data.walletAddress === mockUserAAddress, 'Agent confirmation associates correct address with User A');
+  }
+
+  // 9.5: Multi-Tenant Isolation — User B cannot see or execute with User A's session
+  {
+    const userBSessionId = 'session-user-b-unique-id';
+    
+    // User B status query
+    const reqB = new Request('http://localhost/api/agentic-wallet/status', {
+      headers: { 'x-baw-session-id': userBSessionId }
+    });
+    const resB = await agenticStatusHandler(reqB);
+    const dataB = await resB.json();
+    assert(dataB.data.connected === false, 'User B reports connected: false despite User A being connected');
+    assert(dataB.data.address === null, 'User B address is strictly null; never sees User A address');
+
+    // User B execution attempt
+    const execReqB = new Request('http://localhost/api/agentic-wallet/execute-basket', {
+      method: 'POST',
+      headers: { 
+        'Content-Type': 'application/json',
+        'x-baw-session-id': userBSessionId 
+      },
+      body: JSON.stringify({
+        prompt: 'Attack Basket',
+        investmentAmount: 10,
+        allocations: [{ ticker: 'NVDA', weight: 100 }]
+      })
+    });
+    const execResB = await agenticExecuteHandler(execReqB);
+    const execDataB = await execResB.json();
+    assert(execResB.status === 400 || execResB.status === 401, 'User B execution is blocked');
+    assert(execDataB.code === 'WALLET_NOT_CONNECTED', 'User B blocked with WALLET_NOT_CONNECTED');
+  }
+
+  // 9.6: User A Status & Balance verification
+  {
+    const reqA = new Request('http://localhost/api/agentic-wallet/status', {
+      headers: { 'x-baw-session-id': userASessionId }
+    });
+    const resA = await agenticStatusHandler(reqA);
+    const dataA = await resA.json();
+    assert(dataA.data.connected === true, 'User A reports connected: true');
+    assert(dataA.data.address === mockUserAAddress, 'User A retrieves their own connected MPC address');
+
+    const balReqA = new Request('http://localhost/api/agentic-wallet/balance', {
+      headers: { 'x-baw-session-id': userASessionId }
+    });
+    const balResA = await agenticBalanceHandler(balReqA);
+    const balDataA = await balResA.json();
+    assert(balDataA.success === true, 'User A balance query returns success: true');
+    assert(balDataA.data.walletAddress === mockUserAAddress, 'User A balance query targets User A MPC address');
+  }
+
+  // 9.7: Security Settings & Guardrail Quota Enforcement
+  {
+    const settingsReq = new Request('http://localhost/api/agentic-wallet/settings', {
+      headers: { 'x-baw-session-id': userASessionId }
+    });
+    const settingsRes = await agenticSettingsHandler(settingsReq);
+    const settingsData = await settingsRes.json();
+    assert(settingsData.success === true, 'Settings query returns success: true');
+    assert(settingsData.data.dailyLimit === 50000.0, 'Daily spend limit is $50,000 USDT');
+    assert(settingsData.data.abnormalTxnHandling === 'AutoReject', 'Abnormal Tx policy is AutoReject');
+    assert(settingsData.data.slippage === 0.5, 'Slippage is bounded to 0.5% max');
+
+    // Attempt trade exceeding quota ($50,001 USDT)
+    const overQuotaReq = new Request('http://localhost/api/agentic-wallet/execute-basket', {
+      method: 'POST',
+      headers: { 
+        'Content-Type': 'application/json',
+        'x-baw-session-id': userASessionId 
+      },
+      body: JSON.stringify({
+        prompt: 'Whale allocation',
+        investmentAmount: 50001,
+        allocations: [{ ticker: 'NVDA', weight: 100 }]
+      })
+    });
+    const overQuotaRes = await agenticExecuteHandler(overQuotaReq);
+    const overQuotaData = await overQuotaRes.json();
+    assert(overQuotaRes.status === 400, 'Over-quota execution rejected with HTTP 400');
+    assert(overQuotaData.code === 'GUARDRAIL_VIOLATION_QUOTA', 'Execution blocked with GUARDRAIL_VIOLATION_QUOTA');
+
+    // Attempt trade with empty allocations
+    const emptyAllocReq = new Request('http://localhost/api/agentic-wallet/execute-basket', {
+      method: 'POST',
+      headers: { 
+        'Content-Type': 'application/json',
+        'x-baw-session-id': userASessionId 
+      },
+      body: JSON.stringify({
+        prompt: 'Empty basket',
+        investmentAmount: 10,
+        allocations: []
+      })
+    });
+    const emptyAllocRes = await agenticExecuteHandler(emptyAllocReq);
+    const emptyAllocData = await emptyAllocRes.json();
+    assert(emptyAllocRes.status === 400, 'Empty allocations rejected with HTTP 400');
+    assert(emptyAllocData.code === 'INVALID_PARAMETERS', 'Empty allocations blocked with INVALID_PARAMETERS');
+  }
+
+  // 9.8: Disconnect & Signout Lifecycle
+  {
+    const signoutReq = new Request('http://localhost/api/agentic-wallet/auth/signout', {
+      method: 'POST',
+      headers: { 'x-baw-session-id': userASessionId }
+    });
+    const signoutRes = await agenticSignoutHandler(signoutReq);
+    const signoutData = await signoutRes.json();
+    assert(signoutData.success === true, 'Signout returns success: true');
+
+    const expiredCookie = signoutRes.headers.get('set-cookie');
+    assert(Boolean(expiredCookie && expiredCookie.includes('Max-Age=0')), 'Signout clears session cookie');
+
+    // Verify User A status is now UNCONNECTED
+    const postSignoutReq = new Request('http://localhost/api/agentic-wallet/status', {
+      headers: { 'x-baw-session-id': userASessionId }
+    });
+    const postSignoutRes = await agenticStatusHandler(postSignoutReq);
+    const postSignoutData = await postSignoutRes.json();
+    assert(postSignoutData.data.connected === false, 'After signout, user reports connected: false');
+    assert(postSignoutData.data.status === 'UNCONNECTED', 'After signout, user reports status: UNCONNECTED');
+    assert(postSignoutData.data.address === null, 'After signout, address is cleared');
+  }
 }
 
 // ============================================================================
