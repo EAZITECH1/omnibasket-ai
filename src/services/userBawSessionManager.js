@@ -8,72 +8,88 @@ import util from 'util';
 import QRCode from 'qrcode';
 import { BSC_RWA_TOKENS } from './tokens.js';
 import { checkTokenBalance } from './bscRouter.js';
+import { 
+  saveSession, 
+  loadSession, 
+  deleteSession, 
+  rotateSession 
+} from './bawSessionStore.js';
 
 const execFileAsync = util.promisify(execFile);
 
 /**
- * Isolated in-memory registry of per-user Binance Agentic Wallet sessions.
- * Never shares credentials, addresses, or signing capability across users.
- * Key: sessionId (string) -> SessionData
+ * Cookie Name for Binance Agentic Wallet user session
  */
-const userSessions = new Map();
+export const BAW_COOKIE_NAME = 'omnibasket_baw_sid';
 
 /**
- * Clean up expired or stale sessions
+ * CSRF & Origin validation for state-changing HTTP requests
  */
-function pruneStaleSessions() {
-  const now = Date.now();
-  for (const [id, session] of userSessions.entries()) {
-    // Pairing pending scan expires in 15 minutes
-    if (session.status === 'WAITING_FOR_SCAN' && (now - session.createdAt > 15 * 60 * 1000)) {
-      cleanupSessionDirectory(session.sessionDir);
-      userSessions.delete(id);
-    }
-    // Connected or inactive sessions expire after 24 hours of inactivity
-    else if (now - session.lastActive > 24 * 60 * 60 * 1000) {
-      cleanupSessionDirectory(session.sessionDir);
-      userSessions.delete(id);
-    }
+export function validateCsrfOrigin(req) {
+  if (!req) return false;
+  const method = req.method ? req.method.toUpperCase() : 'GET';
+  if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') {
+    return true;
   }
-}
 
-/**
- * Safely recursively remove temporary session directory
- */
-function cleanupSessionDirectory(dirPath) {
-  if (!dirPath || typeof dirPath !== 'string') return;
+  const origin = req.headers?.get ? req.headers.get('origin') : req.headers?.origin;
+  const host = req.headers?.get ? req.headers.get('host') : req.headers?.host;
+
+  if (!origin) {
+    // If no origin header is sent (e.g. programmatic test or same-site curl), verify referer if present
+    const referer = req.headers?.get ? req.headers.get('referer') : req.headers?.referer;
+    if (referer && host) {
+      try {
+        const refUrl = new URL(referer);
+        return refUrl.host === host;
+      } catch (_) {
+        return false;
+      }
+    }
+    return true; // Allow non-browser requests without origin/referer header
+  }
+
   try {
-    if (fs.existsSync(dirPath)) {
-      fs.rmSync(dirPath, { recursive: true, force: true });
+    const originUrl = new URL(origin);
+    if (host && originUrl.host !== host) {
+      return false;
     }
-  } catch (err) {
-    console.warn(`[userBawSessionManager] Failed to remove session dir: ${err.message}`);
+    return true;
+  } catch (_) {
+    return false;
   }
 }
 
 /**
- * Extract or generate session ID from incoming HTTP request
- * Priority: Header 'x-baw-session-id' -> Cookie 'omnibasket_baw_sid' -> Body/Query 'sessionId'
+ * Extract session ID solely from the HttpOnly cookie.
+ * Strictly ignores any caller-supplied sessionId in request bodies, query params, or custom headers.
  */
 export function getSessionIdFromRequest(req) {
   if (!req) return null;
 
-  // 1. Header check
-  const headerSid = req.headers?.get ? req.headers.get('x-baw-session-id') : req.headers?.['x-baw-session-id'];
-  if (headerSid && typeof headerSid === 'string' && headerSid.trim()) {
-    return headerSid.trim();
+  const cookieHeader = req.headers?.get ? req.headers.get('cookie') : req.headers?.cookie;
+  if (!cookieHeader || typeof cookieHeader !== 'string') {
+    return null;
   }
 
-  // 2. Cookie check
-  const cookieHeader = req.headers?.get ? req.headers.get('cookie') : req.headers?.cookie;
-  if (cookieHeader && typeof cookieHeader === 'string') {
-    const match = cookieHeader.match(/omnibasket_baw_sid=([a-zA-Z0-9_-]+)/);
-    if (match && match[1]) {
-      return match[1];
-    }
+  const match = cookieHeader.match(new RegExp(`(?:^|;\\s*)${BAW_COOKIE_NAME}=([a-zA-Z0-9_-]+)(?:;|$)`));
+  if (match && match[1]) {
+    return match[1].trim();
   }
 
   return null;
+}
+
+/**
+ * Helper to build Set-Cookie header string
+ */
+export function buildSessionCookieHeader(sessionId, maxAgeSeconds = 86400) {
+  const isProd = process.env.NODE_ENV === 'production';
+  if (!sessionId || maxAgeSeconds <= 0) {
+    return `${BAW_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+  }
+  const secureFlag = isProd ? '; Secure' : '';
+  return `${BAW_COOKIE_NAME}=${sessionId}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}${secureFlag}`;
 }
 
 /**
@@ -104,52 +120,7 @@ export function generateEphemeralKeyPair() {
 }
 
 /**
- * Get or create an isolated per-user session
- */
-export function getOrCreateUserSession(requestedSessionId = null) {
-  pruneStaleSessions();
-
-  const sessionId = (requestedSessionId && typeof requestedSessionId === 'string' && requestedSessionId.trim())
-    ? requestedSessionId.trim()
-    : crypto.randomUUID();
-
-  if (userSessions.has(sessionId)) {
-    const existing = userSessions.get(sessionId);
-    existing.lastActive = Date.now();
-    return existing;
-  }
-
-  const sessionDir = path.join(os.tmpdir(), 'omnibasket_baw_sessions', sessionId);
-  const clientId = crypto.randomUUID();
-  const keyPair = generateEphemeralKeyPair();
-
-  const session = {
-    sessionId,
-    sessionDir,
-    clientId,
-    keyPair,
-    qrCodeId: null,
-    pairingCode: keyPair.pairingCode,
-    urlForWeb: null,
-    qrSvg: null,
-    status: 'UNCONNECTED',
-    appConfirmed: false,
-    agentConfirmed: false,
-    agentSessionId: null,
-    walletAddress: null,
-    dailyLimit: 50000.0,
-    quotaLeft: 50000.0,
-    quotaUsed: 0.0,
-    createdAt: Date.now(),
-    lastActive: Date.now()
-  };
-
-  userSessions.set(sessionId, session);
-  return session;
-}
-
-/**
- * Call Binance Gateway BAPI directly with per-user ephemeral client identification
+ * Call Binance Gateway BAPI directly with ephemeral client credentials
  */
 async function callBinanceBapi(endpoint, method = 'GET', body = null, agentSessionId = null, clientId = null) {
   const cId = clientId || crypto.randomUUID();
@@ -187,7 +158,7 @@ async function callBinanceBapi(endpoint, method = 'GET', body = null, agentSessi
       path: endpoint,
       method: method,
       headers: headers,
-      timeout: 8000
+      timeout: 3000
     }, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
@@ -216,22 +187,55 @@ async function callBinanceBapi(endpoint, method = 'GET', body = null, agentSessi
 
 /**
  * 1. Initiate Binance App QR Code Authentication Pairing (baw auth signin)
- * Scoped strictly to the calling user's isolated session
+ * If Binance pairing cannot be initiated through a verified supported flow,
+ * FAILS CLOSED. NEVER returns a fabricated QR URL or fake success.
  */
-export async function authSignin(sessionId = null) {
-  const session = getOrCreateUserSession(sessionId);
+export async function authSignin(req) {
+  // CSRF protection check
+  if (!validateCsrfOrigin(req)) {
+    return {
+      success: false,
+      status: 403,
+      code: 'CSRF_REJECTED',
+      error: 'Cross-origin request rejected'
+    };
+  }
 
-  // Generate fresh keypair for every signin attempt
-  session.keyPair = generateEphemeralKeyPair();
-  session.pairingCode = session.keyPair.pairingCode;
+  // Retrieve existing session from cookie or issue new ID
+  let sessionId = getSessionIdFromRequest(req);
+  let session = sessionId ? await loadSession(sessionId) : null;
+
+  if (!session) {
+    sessionId = crypto.randomUUID();
+    session = {
+      sessionId,
+      clientId: crypto.randomUUID(),
+      status: 'UNCONNECTED',
+      appConfirmed: false,
+      agentConfirmed: false,
+      agentSessionId: null,
+      walletAddress: null,
+      dailyLimit: 50000.0,
+      quotaLeft: 50000.0,
+      quotaUsed: 0.0,
+      createdAt: Date.now(),
+      lastActive: Date.now()
+    };
+  }
+
+  // Generate fresh ephemeral ECDH keypair
+  const keyPair = generateEphemeralKeyPair();
+  session.pairingCode = keyPair.pairingCode;
   session.status = 'WAITING_FOR_SCAN';
   session.appConfirmed = false;
   session.agentConfirmed = false;
   session.walletAddress = null;
+  session.qrCodeId = null;
+  session.urlForWeb = null;
 
   let pairingData = null;
 
-  // 1. Primary Engine: Direct Binance Gateway registration
+  // 1. Direct Binance Gateway registration
   try {
     const loginRes = await callBinanceBapi(
       '/bapi/defi/v1/public/wallet-direct/agent-wallet/login',
@@ -239,7 +243,7 @@ export async function authSignin(sessionId = null) {
       {
         isFirstLogin: true,
         os: 'Windows',
-        publicKeyHex: session.keyPair.rawPub
+        publicKeyHex: keyPair.rawPub
       },
       null,
       session.clientId
@@ -247,53 +251,61 @@ export async function authSignin(sessionId = null) {
 
     if (loginRes?.data?.code === '000000' && loginRes.data.data?.qrInfo) {
       const qrInfo = loginRes.data.data.qrInfo;
-      pairingData = {
-        qrCodeId: qrInfo.qrCodeId,
-        expireAt: String(qrInfo.expireAt),
-        urlForWeb: qrInfo.qrCodeUrl,
-        pairingCode: session.keyPair.pairingCode
-      };
-    }
-  } catch (err) {
-    console.warn('[userBawSessionManager] Direct BAPI registration notice:', err.message);
-  }
-
-  // 2. Fallback: isolated baw CLI execution
-  if (!pairingData || !pairingData.urlForWeb) {
-    try {
-      if (!fs.existsSync(session.sessionDir)) {
-        fs.mkdirSync(session.sessionDir, { recursive: true });
-      }
-      const { stdout } = await execFileAsync('npx', ['baw', 'auth', 'signin', '--json'], {
-        timeout: 10000,
-        env: { ...process.env, BINANCE_BAW_DIR: session.sessionDir }
-      });
-      const parsed = JSON.parse(stdout);
-      if (parsed?.success && parsed.data?.urlForWeb) {
+      if (qrInfo.qrCodeUrl && qrInfo.qrCodeId) {
         pairingData = {
-          qrCodeId: parsed.data.qrCodeId,
-          expireAt: String(parsed.data.expireAt || Date.now() + 300000),
-          urlForWeb: parsed.data.urlForWeb,
-          pairingCode: parsed.data.pairingCode || session.keyPair.pairingCode
+          qrCodeId: qrInfo.qrCodeId,
+          expireAt: Number(qrInfo.expireAt) || (Date.now() + 300000),
+          urlForWeb: qrInfo.qrCodeUrl,
+          pairingCode: keyPair.pairingCode
         };
       }
-    } catch (cliErr) {
-      console.warn('[userBawSessionManager] CLI fallback notice:', cliErr.message);
+    }
+  } catch (err) {
+    console.warn('[userBawSessionManager] Direct Binance Gateway attempt notice:', err.message);
+  }
+
+  // 2. Fallback: isolated baw CLI execution if local binary is installed
+  if (!pairingData || !pairingData.urlForWeb) {
+    const customBaw = process.env.BAW_BIN_PATH && fs.existsSync(process.env.BAW_BIN_PATH) ? process.env.BAW_BIN_PATH : null;
+    const localBaw = path.join(os.homedir(), '.local', 'bin', 'baw');
+    const bawBin = customBaw || (fs.existsSync(localBaw) ? localBaw : null);
+
+    if (bawBin) {
+      try {
+        const sessionDir = path.join(os.tmpdir(), 'omnibasket_baw_sessions', sessionId);
+        if (!fs.existsSync(sessionDir)) {
+          fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
+        }
+        const { stdout } = await execFileAsync(bawBin, ['auth', 'signin', '--json'], {
+          timeout: 2500,
+          env: { ...process.env, BINANCE_BAW_DIR: sessionDir }
+        });
+        const parsed = JSON.parse(stdout);
+        if (parsed?.success && parsed.data?.urlForWeb && parsed.data?.qrCodeId) {
+          pairingData = {
+            qrCodeId: parsed.data.qrCodeId,
+            expireAt: Number(parsed.data.expireAt) || (Date.now() + 300000),
+            urlForWeb: parsed.data.urlForWeb,
+            pairingCode: parsed.data.pairingCode || keyPair.pairingCode
+          };
+        }
+      } catch (_) {}
     }
   }
 
-  // 3. Fallback Safety Envelope: deterministic uni-qr URL
-  if (!pairingData || !pairingData.urlForWeb) {
-    const qrCodeId = `baw-${Date.now()}-${session.keyPair.pairingCode}`;
-    pairingData = {
-      qrCodeId,
-      expireAt: String(Date.now() + 300000),
-      urlForWeb: `https://app.binance.com/uni-qr/${session.keyPair.pairingCode}`,
-      pairingCode: session.keyPair.pairingCode
+  // CRITICAL SECURITY ENFORCEMENT:
+  // If Binance gateway did not return a genuine QR pairing URL, FAIL CLOSED.
+  // Never fabricate a synthetic QR URL or pretend success.
+  if (!pairingData || !pairingData.urlForWeb || !pairingData.qrCodeId) {
+    return {
+      success: false,
+      status: 503,
+      code: 'BINANCE_SERVICE_UNAVAILABLE',
+      error: 'Unable to register session with Binance Agentic Gateway. Binance service is unreachable or rate-limited. Please retry or connect via Binance Web3 Wallet extension.'
     };
   }
 
-  // Generate crisp inline SVG QR code
+  // Generate vector SVG for the genuine Binance URL
   let qrSvg = null;
   try {
     qrSvg = await QRCode.toString(pairingData.urlForWeb, {
@@ -306,25 +318,31 @@ export async function authSignin(sessionId = null) {
       }
     });
   } catch (qrErr) {
-    console.warn('[userBawSessionManager] Failed to generate SVG QR:', qrErr.message);
+    console.warn('[userBawSessionManager] SVG QR generation error:', qrErr.message);
   }
 
-  // Update session record
   session.qrCodeId = pairingData.qrCodeId;
   session.urlForWeb = pairingData.urlForWeb;
   session.pairingCode = pairingData.pairingCode;
-  session.qrSvg = qrSvg;
+  session.expireAt = pairingData.expireAt;
+  session.lastActive = Date.now();
+  session.expiresAt = pairingData.expireAt + 3600000; // session TTL
 
+  // Persist to durable encrypted store
+  await saveSession(sessionId, session);
+
+  // Return success with cookie info; DO NOT expose sessionId in JSON body
   return {
     success: true,
-    sessionId: session.sessionId,
+    status: 200,
+    sessionId, // used internally by route handler to set Set-Cookie header
+    cookieHeader: buildSessionCookieHeader(sessionId),
     data: {
       qrCodeId: session.qrCodeId,
       pairingCode: session.pairingCode,
       urlForWeb: session.urlForWeb,
-      expireAt: pairingData.expireAt,
-      qrSvg: session.qrSvg,
-      alreadyConnected: false,
+      expireAt: String(pairingData.expireAt),
+      qrSvg,
       status: session.status
     }
   };
@@ -332,27 +350,46 @@ export async function authSignin(sessionId = null) {
 
 /**
  * 2. Check QR Code Pairing Status (Listener Polling)
- * Strictly verifies status against the user's isolated session
+ * Strictly verifies status against the session identified by the HttpOnly cookie.
  */
-export async function checkPairingStatus(sessionId, qrCodeId) {
+export async function checkPairingStatus(req) {
+  const sessionId = getSessionIdFromRequest(req);
   if (!sessionId) {
-    return { success: false, error: 'Session ID is required' };
-  }
-
-  const session = userSessions.get(sessionId);
-  if (!session) {
-    return { 
-      success: false, 
-      error: 'Session not found. Please initiate a new pairing session.',
-      code: 'SESSION_NOT_FOUND' 
+    return {
+      success: false,
+      status: 401,
+      code: 'SESSION_REQUIRED',
+      error: 'Active session cookie required'
     };
   }
 
-  session.lastActive = Date.now();
+  const session = await loadSession(sessionId);
+  if (!session) {
+    return {
+      success: false,
+      status: 404,
+      code: 'SESSION_NOT_FOUND',
+      error: 'Session not found or expired. Please initiate pairing.'
+    };
+  }
 
+  // Verify expiration
+  if (session.expireAt && Date.now() > session.expireAt) {
+    session.status = 'EXPIRED';
+    await saveSession(sessionId, session);
+    return {
+      success: false,
+      status: 410,
+      code: 'PAIRING_EXPIRED',
+      error: 'Pairing session has expired. Please refresh the QR code.'
+    };
+  }
+
+  // If already verified and connected
   if (session.status === 'CONNECTED' && session.walletAddress) {
     return {
       success: true,
+      status: 200,
       data: {
         qrCodeId: session.qrCodeId,
         status: 'CONNECTED',
@@ -364,14 +401,13 @@ export async function checkPairingStatus(sessionId, qrCodeId) {
     };
   }
 
-  // Query Binance Gateway for confirmation status
-  const targetQrId = qrCodeId || session.qrCodeId;
-  if (targetQrId && !session.appConfirmed) {
+  // Query Binance Gateway for confirmation
+  if (session.qrCodeId && !session.appConfirmed) {
     try {
       const confirmRes = await callBinanceBapi(
         '/bapi/defi/v1/public/wallet-direct/agent-wallet/login/confirm',
         'POST',
-        { qrCodeId: targetQrId },
+        { qrCodeId: session.qrCodeId },
         session.agentSessionId,
         session.clientId
       );
@@ -388,7 +424,7 @@ export async function checkPairingStatus(sessionId, qrCodeId) {
           session.appConfirmed = true;
           session.status = 'APP_CONFIRMED';
 
-          // Retrieve live MPC wallet address for BSC Mainnet (Chain ID 56)
+          // Query trusted MPC wallet list directly from Binance
           try {
             const listRes = await callBinanceBapi(
               '/bapi/defi/v1/public/wallet-direct/agent-wallet/mpc-wallet/list',
@@ -400,21 +436,24 @@ export async function checkPairingStatus(sessionId, qrCodeId) {
             const bscAddr = listRes?.data?.data?.[0]?.subWalletList?.[0]?.addresses?.find(a => a.binanceChainId === '56')?.address;
             if (bscAddr) {
               session.walletAddress = bscAddr;
+              session.binanceChainId = '56';
             }
           } catch (_) {}
+
+          session.lastActive = Date.now();
+          await saveSession(sessionId, session);
         }
       }
-    } catch (pollErr) {
-      // Quietly log and return current status
-    }
+    } catch (_) {}
   }
 
   const isConfirmed = session.appConfirmed || session.status === 'APP_CONFIRMED' || session.status === 'CONNECTED';
 
   return {
     success: true,
+    status: 200,
     data: {
-      qrCodeId: targetQrId,
+      qrCodeId: session.qrCodeId,
       status: session.status,
       appConfirmed: isConfirmed,
       pairingCode: session.pairingCode,
@@ -428,63 +467,137 @@ export async function checkPairingStatus(sessionId, qrCodeId) {
 
 /**
  * 3. Complete Sign-In inside Agent (Agent Confirmation Popup)
- * Transitions user session to CONNECTED and writes isolated session state
+ * CRITICAL SECURITY REQUIREMENT:
+ * Must validate that the session's actual Binance pairing is genuinely approved by Binance.
+ * Rejects unverified, mismatched, expired, or caller-faked confirmations.
+ * Rotates session ID upon verified confirmation.
  */
-export async function confirmAgentSignin(sessionId, { qrCodeId, confirmWord } = {}) {
+export async function confirmAgentSignin(req, body = {}) {
+  // CSRF protection check
+  if (!validateCsrfOrigin(req)) {
+    return {
+      success: false,
+      status: 403,
+      code: 'CSRF_REJECTED',
+      error: 'Cross-origin request rejected'
+    };
+  }
+
+  const sessionId = getSessionIdFromRequest(req);
   if (!sessionId) {
-    return { success: false, error: 'Session ID is required' };
+    return {
+      success: false,
+      status: 401,
+      code: 'SESSION_REQUIRED',
+      error: 'Active session cookie required'
+    };
   }
 
-  const session = userSessions.get(sessionId);
+  const session = await loadSession(sessionId);
   if (!session) {
-    return { success: false, error: 'Session not found', code: 'SESSION_NOT_FOUND' };
+    return {
+      success: false,
+      status: 404,
+      code: 'SESSION_NOT_FOUND',
+      error: 'Session not found or expired'
+    };
   }
 
-  session.status = 'CONNECTED';
-  session.appConfirmed = true;
-  session.agentConfirmed = true;
-  session.lastActive = Date.now();
+  const { qrCodeId } = body;
 
-  // If wallet address is still missing, attempt MPC lookup or fallback
-  if (!session.walletAddress && session.agentSessionId) {
+  // 1. Validate that submitted qrCodeId matches session
+  if (!qrCodeId || qrCodeId !== session.qrCodeId) {
+    return {
+      success: false,
+      status: 400,
+      code: 'MISMATCHED_QR_CODE',
+      error: 'Submitted qrCodeId does not match the active pairing session'
+    };
+  }
+
+  // 2. Validate expiration
+  if (session.expireAt && Date.now() > session.expireAt) {
+    session.status = 'EXPIRED';
+    await saveSession(sessionId, session);
+    return {
+      success: false,
+      status: 410,
+      code: 'PAIRING_EXPIRED',
+      error: 'Pairing session expired. Please refresh the QR code in your Agent.'
+    };
+  }
+
+  // 3. Verify genuine Binance mobile app authorization
+  // Do NOT accept caller-supplied address, pairing code, or confirmWord as proof!
+  let isVerifiedByBinance = session.appConfirmed === true && Boolean(session.walletAddress);
+
+  if (!isVerifiedByBinance && session.qrCodeId) {
     try {
-      const listRes = await callBinanceBapi(
-        '/bapi/defi/v1/public/wallet-direct/agent-wallet/mpc-wallet/list',
+      const confirmRes = await callBinanceBapi(
+        '/bapi/defi/v1/public/wallet-direct/agent-wallet/login/confirm',
         'POST',
-        {},
+        { qrCodeId: session.qrCodeId },
         session.agentSessionId,
         session.clientId
       );
-      const bscAddr = listRes?.data?.data?.[0]?.subWalletList?.[0]?.addresses?.find(a => a.binanceChainId === '56')?.address;
-      if (bscAddr) {
-        session.walletAddress = bscAddr;
+
+      if (confirmRes?.data?.code === '000000') {
+        const connStatus = confirmRes.data.data?.connectionStatus;
+        const agentSessionId = confirmRes.data.data?.agentSessionId;
+
+        if (agentSessionId) {
+          session.agentSessionId = agentSessionId;
+        }
+
+        if (connStatus === 'CONNECTED' || connStatus === 'CONNECTING') {
+          session.appConfirmed = true;
+          // Retrieve trusted MPC wallet address on BSC
+          const listRes = await callBinanceBapi(
+            '/bapi/defi/v1/public/wallet-direct/agent-wallet/mpc-wallet/list',
+            'POST',
+            {},
+            session.agentSessionId,
+            session.clientId
+          );
+          const bscAddr = listRes?.data?.data?.[0]?.subWalletList?.[0]?.addresses?.find(a => a.binanceChainId === '56')?.address;
+          if (bscAddr) {
+            session.walletAddress = bscAddr;
+            session.binanceChainId = '56';
+            isVerifiedByBinance = true;
+          }
+        }
       }
     } catch (_) {}
   }
 
-  // Atomically persist isolated session file in sessionDir for baw CLI operations
-  try {
-    if (!fs.existsSync(session.sessionDir)) {
-      fs.mkdirSync(session.sessionDir, { recursive: true });
-    }
-    const sessionPath = path.join(session.sessionDir, 'session.json');
-    const sessionFileContent = {
-      status: 'CONNECTED',
-      address: session.walletAddress,
-      sessionId: session.agentSessionId,
-      clientId: session.clientId,
-      dailyLimit: session.dailyLimit,
-      quotaLeft: session.quotaLeft,
-      quotaUsed: session.quotaUsed,
-      lastPaired: new Date().toISOString()
+  // If Binance has NOT confirmed approval, FAIL CLOSED.
+  if (!isVerifiedByBinance || !session.walletAddress) {
+    return {
+      success: false,
+      status: 403,
+      code: 'UNVERIFIED_AUTHORIZATION',
+      error: 'Binance App has not authorized this session. Please scan and authorize on your Binance mobile app first.'
     };
-    fs.writeFileSync(sessionPath, JSON.stringify(sessionFileContent, null, 2), 'utf8');
-  } catch (fsErr) {
-    console.warn('[userBawSessionManager] Failed to write session.json:', fsErr.message);
   }
+
+  // 4. Genuine verification passed -> Mark CONNECTED & Rotate Session ID (Prevents Session Fixation)
+  session.status = 'CONNECTED';
+  session.agentConfirmed = true;
+  session.lastActive = Date.now();
+  session.expiresAt = Date.now() + 24 * 60 * 60 * 1000; // 24 hours
+
+  // Save session state to durable store
+  await saveSession(sessionId, session);
+
+  // Rotate session credential
+  const rotated = await rotateSession(sessionId);
+  const finalSessionId = rotated ? rotated.newSessionId : sessionId;
 
   return {
     success: true,
+    status: 200,
+    rotatedSessionId: finalSessionId,
+    cookieHeader: buildSessionCookieHeader(finalSessionId),
     data: {
       status: 'CONNECTED',
       walletAddress: session.walletAddress,
@@ -492,39 +605,47 @@ export async function confirmAgentSignin(sessionId, { qrCodeId, confirmWord } = 
       chainName: 'BNB Smart Chain (BSC)',
       dailyLimit: session.dailyLimit,
       quotaLeft: session.quotaLeft,
-      message: 'Agent session confirmed! Keyless MPC Wallet connected.'
+      message: 'Binance App authorization verified. Keyless MPC Wallet connected.'
     }
   };
 }
 
 /**
- * 4. Sign Out and Purge Active Session
- * Destroys session state in memory and deletes temporary session directory
+ * 4. Sign Out and Revoke Active Session
  */
-export async function authSignout(sessionId) {
-  if (!sessionId) {
-    return { success: true, message: 'No active session' };
+export async function authSignout(req) {
+  // CSRF protection check
+  if (!validateCsrfOrigin(req)) {
+    return {
+      success: false,
+      status: 403,
+      code: 'CSRF_REJECTED',
+      error: 'Cross-origin request rejected'
+    };
   }
 
-  const session = userSessions.get(sessionId);
-  if (session) {
-    cleanupSessionDirectory(session.sessionDir);
-    userSessions.delete(sessionId);
+  const sessionId = getSessionIdFromRequest(req);
+  if (sessionId) {
+    await deleteSession(sessionId);
   }
 
   return {
     success: true,
-    message: 'Binance Agentic Wallet session disconnected and cleared.'
+    status: 200,
+    cookieHeader: buildSessionCookieHeader(null, 0),
+    message: 'Binance Agentic Wallet session disconnected and revoked.'
   };
 }
 
 /**
- * 5. Query Calling User's Current Status
+ * 5. Query Calling User's Current Status (Cookie Authenticated)
  */
-export function getUserStatus(sessionId) {
-  if (!sessionId || !userSessions.has(sessionId)) {
+export async function getUserStatus(req) {
+  const sessionId = getSessionIdFromRequest(req);
+  if (!sessionId) {
     return {
       success: true,
+      status: 200,
       data: {
         status: 'UNCONNECTED',
         connected: false,
@@ -532,36 +653,55 @@ export function getUserStatus(sessionId) {
         binanceChainId: '56',
         chainName: 'BNB Smart Chain (BSC)',
         isKeylessMpc: true,
+        quota: null,
         guardrails: {
           dailyLimit: 50000.0,
           quotaLeft: 50000.0,
           quotaUsed: 0.0,
-          abnormalTxPolicy: 'AutoReject',
-          slippageTolerance: '0.5%'
+          abnormalTxPolicy: 'AutoReject (App Guardrail)',
+          slippageTolerance: '0.5% (App Safeguard)'
         }
       }
     };
   }
 
-  const session = userSessions.get(sessionId);
+  const session = await loadSession(sessionId);
+  if (!session) {
+    return {
+      success: true,
+      status: 200,
+      data: {
+        status: 'UNCONNECTED',
+        connected: false,
+        address: null,
+        binanceChainId: '56',
+        chainName: 'BNB Smart Chain (BSC)',
+        isKeylessMpc: true,
+        quota: null
+      }
+    };
+  }
+
   session.lastActive = Date.now();
-  const isConnected = session.status === 'CONNECTED';
+  await saveSession(sessionId, session);
+  const isConnected = session.status === 'CONNECTED' && Boolean(session.walletAddress);
 
   return {
     success: true,
+    status: 200,
     data: {
       status: session.status,
       connected: isConnected,
-      address: session.walletAddress,
+      address: isConnected ? session.walletAddress : null,
       binanceChainId: '56',
       chainName: 'BNB Smart Chain (BSC)',
       isKeylessMpc: true,
       lastActive: new Date(session.lastActive).toISOString(),
-      quota: {
+      quota: isConnected ? {
         dailyLimit: session.dailyLimit,
         quotaLeft: session.quotaLeft,
         quotaUsed: session.quotaUsed
-      }
+      } : null
     }
   };
 }
@@ -569,13 +709,15 @@ export function getUserStatus(sessionId) {
 /**
  * 6. Query Security Settings & Guardrails for Calling User
  */
-export function getSettings(sessionId) {
-  const session = sessionId ? userSessions.get(sessionId) : null;
+export async function getSettings(req) {
+  const sessionId = getSessionIdFromRequest(req);
+  const session = sessionId ? await loadSession(sessionId) : null;
   const quotaLeft = session ? session.quotaLeft : 50000.0;
   const quotaUsed = session ? session.quotaUsed : 0.0;
 
   return {
     success: true,
+    status: 200,
     data: {
       dailyLimit: 50000.0,
       quotaLeft: Number(quotaLeft.toFixed(2)),
@@ -593,11 +735,14 @@ export function getSettings(sessionId) {
 /**
  * 7. Query Token & Asset Balances on BSC Mainnet #56 for Calling User
  */
-export async function getBalance(sessionId) {
-  const session = sessionId ? userSessions.get(sessionId) : null;
-  if (!session || !session.walletAddress) {
+export async function getBalance(req) {
+  const sessionId = getSessionIdFromRequest(req);
+  const session = sessionId ? await loadSession(sessionId) : null;
+
+  if (!session || session.status !== 'CONNECTED' || !session.walletAddress) {
     return {
       success: true,
+      status: 200,
       data: {
         walletAddress: null,
         chainId: 56,
@@ -610,28 +755,31 @@ export async function getBalance(sessionId) {
     };
   }
 
-  session.lastActive = Date.now();
-
   try {
     const usdtAddress = BSC_RWA_TOKENS.USDT.contractAddress;
-    const usdtBalanceWei = await checkTokenBalance({ tokenAddress: usdtAddress, ownerAddress: session.walletAddress }).catch(() => 0n);
+    const usdtBalanceWei = await checkTokenBalance({
+      tokenAddress: usdtAddress,
+      ownerAddress: session.walletAddress
+    }).catch(() => 0n);
+
     const usdtFormatted = Number(usdtBalanceWei) / 1e18;
 
     return {
       success: true,
+      status: 200,
       data: {
         walletAddress: session.walletAddress,
         chainId: 56,
         balances: [
-          { symbol: 'USDT', name: 'Tether USD', balance: usdtFormatted, priceUsd: 1.0, valueUsd: usdtFormatted },
-          { symbol: 'BNB', name: 'BNB Native', balance: 0.0, priceUsd: 580.0, valueUsd: 0.0 }
+          { symbol: 'USDT', name: 'Tether USD', balance: usdtFormatted, priceUsd: 1.0, valueUsd: usdtFormatted }
         ],
         totalValueUsd: usdtFormatted
       }
     };
-  } catch (err) {
+  } catch (_) {
     return {
       success: true,
+      status: 200,
       data: {
         walletAddress: session.walletAddress,
         chainId: 56,
@@ -647,132 +795,92 @@ export async function getBalance(sessionId) {
 /**
  * 8. Execute Autonomous Basket Allocation via Binance Agentic Wallet under Guardrails
  */
-export async function executeBasketAutonomous({ sessionId, prompt, investmentAmount, allocations, chainId = 56 }) {
-  if (!sessionId) {
+export async function executeBasketAutonomous(req, body = {}) {
+  // CSRF protection check
+  if (!validateCsrfOrigin(req)) {
     return {
       success: false,
-      code: 'WALLET_NOT_CONNECTED',
-      message: 'Binance Agentic Wallet session is missing. Please pair your wallet.'
+      status: 403,
+      code: 'CSRF_REJECTED',
+      error: 'Cross-origin request rejected'
     };
   }
 
-  const session = userSessions.get(sessionId);
+  const sessionId = getSessionIdFromRequest(req);
+  if (!sessionId) {
+    return {
+      success: false,
+      status: 401,
+      code: 'WALLET_NOT_CONNECTED',
+      error: 'Active session cookie required'
+    };
+  }
+
+  const session = await loadSession(sessionId);
   if (!session || session.status !== 'CONNECTED' || !session.walletAddress) {
     return {
       success: false,
+      status: 401,
       code: 'WALLET_NOT_CONNECTED',
-      message: 'Binance Agentic Wallet is not connected. Please scan the QR code with your Binance App to pair your Keyless MPC Wallet before executing autonomous trades.',
+      error: 'Binance Agentic Wallet is not connected. Please scan the QR code with your Binance App to pair your Keyless MPC Wallet before executing autonomous trades.',
       walletAddress: null
     };
   }
 
   session.lastActive = Date.now();
+  const { investmentAmount, allocations, chainId = 56 } = body;
   const amount = Number(investmentAmount);
 
-  // Guardrail 1: Quota check
+  // App Guardrail 1: Quota check
   if (amount > session.quotaLeft) {
     return {
       success: false,
+      status: 400,
       code: 'GUARDRAIL_VIOLATION_QUOTA',
-      message: `Execution rejected by Binance Agentic Wallet Guardrails: Requested $${amount} USDT exceeds remaining 24h quota of $${session.quotaLeft.toFixed(2)} USDT.`,
+      error: `Execution rejected by OmniBasket Guardrails: Requested $${amount} USDT exceeds remaining 24h quota of $${session.quotaLeft.toFixed(2)} USDT.`,
       quotaLeft: session.quotaLeft,
       dailyLimit: session.dailyLimit
     };
   }
 
-  // Guardrail 2: Input validation
+  // App Guardrail 2: Input validation
   if (isNaN(amount) || amount <= 0 || !Array.isArray(allocations) || allocations.length === 0) {
     return {
       success: false,
+      status: 400,
       code: 'INVALID_PARAMETERS',
-      message: 'Invalid investment parameters or empty allocation basket.'
+      error: 'Invalid investment parameters or empty allocation basket.'
     };
   }
 
-  const executionChainId = 56;
-  const usdtAddress = BSC_RWA_TOKENS.USDT.contractAddress;
-  const executedAllocations = [];
-  const errors = [];
-
-  for (const alloc of allocations) {
-    const tokenInfo = BSC_RWA_TOKENS[alloc.ticker || alloc.symbol];
-    if (!tokenInfo || !tokenInfo.tradableOnBscDEX) {
-      errors.push(`${alloc.ticker || alloc.symbol}: Token not tradable or unroutable on BSC.`);
-      continue;
-    }
-
-    const allocWeight = alloc.weight || (100 / allocations.length);
-    const legUsdt = Number(((amount * allocWeight) / 100).toFixed(4));
-    if (legUsdt < 5.0) {
-      continue; // Below $5 minimum floor
-    }
-
-    try {
-      // Execute swap via baw market-order swap in user's isolated directory
-      const swapArgs = [
-        'market-order', 'swap',
-        '--binanceChainId', String(executionChainId),
-        '--fromToken', usdtAddress,
-        '--toToken', tokenInfo.contractAddress,
-        '--fromTokenQty', String(legUsdt),
-        '--slippage', '0.5',
-        '--mev', 'true',
-        '--gasLevel', 'MEDIUM',
-        '--json'
-      ];
-
-      const { stdout } = await execFileAsync('npx', ['baw', ...swapArgs], {
-        timeout: 30000,
-        env: { ...process.env, BINANCE_BAW_DIR: session.sessionDir }
-      });
-
-      const parsed = JSON.parse(stdout);
-      if (parsed?.success || parsed?.data?.txHash) {
-        executedAllocations.push({
-          ticker: alloc.ticker || alloc.symbol,
-          name: tokenInfo.name,
-          allocatedUsdt: legUsdt,
-          txHash: parsed?.data?.txHash || `order-${Date.now()}`,
-          status: 'ACQUIRED'
-        });
-      } else {
-        errors.push(`${alloc.ticker}: ${parsed?.error?.message || 'Execution error'}`);
-      }
-    } catch (swapErr) {
-      // Parse stdout if present
-      if (swapErr.stdout) {
-        try {
-          const parsed = JSON.parse(swapErr.stdout);
-          errors.push(`${alloc.ticker || alloc.symbol}: ${parsed?.error?.message || swapErr.message}`);
-        } catch (_) {
-          errors.push(`${alloc.ticker || alloc.symbol}: ${swapErr.message}`);
-        }
-      } else {
-        errors.push(`${alloc.ticker || alloc.symbol}: ${swapErr.message}`);
-      }
-    }
-  }
-
-  if (executedAllocations.length === 0) {
+  // App Guardrail 3: Chain ID must be BSC Mainnet 56
+  if (Number(chainId) !== 56) {
     return {
       success: false,
-      code: 'EXECUTION_FAILED',
-      message: `Binance Agentic Wallet execution failed: ${errors.join(' | ')}`,
-      walletAddress: session.walletAddress,
-      errors
+      status: 400,
+      code: 'UNSUPPORTED_CHAIN',
+      error: 'Binance Agentic Wallet execution is strictly pinned to BNB Smart Chain Mainnet (Chain ID 56).'
     };
   }
 
-  // Update session quota
-  const spentUsdt = executedAllocations.reduce((sum, a) => sum + a.allocatedUsdt, 0);
-  session.quotaUsed += spentUsdt;
-  session.quotaLeft = Math.max(0, session.quotaLeft - spentUsdt);
+  // App Guardrail 4: Total weight check
+  const totalWeight = allocations.reduce((sum, a) => sum + (Number(a.weight) || 0), 0);
+  if (totalWeight > 100.001) {
+    return {
+      success: false,
+      status: 400,
+      code: 'INVALID_ALLOCATION_WEIGHTS',
+      error: 'Total basket allocation weights cannot exceed 100%.'
+    };
+  }
 
+  // Fail closed if CLI or API execution cannot genuinely broadcast with confirmed receipts
+  // If Binance per-user execution environment is not configured, report the exact blocker
   return {
-    success: true,
-    summary: `Executed ${executedAllocations.length} swap(s) via Binance Agentic Wallet on BSC.`,
-    allocations: executedAllocations,
-    quotaLeft: session.quotaLeft,
+    success: false,
+    status: 503,
+    code: 'AUTONOMOUS_EXECUTION_BLOCKED',
+    error: 'Autonomous server-side trade submission requires the Binance Web3 Wallet Extension or a configured local Agentic Wallet signer daemon. Please switch to Extension Wallet mode to execute trades with your browser wallet.',
     walletAddress: session.walletAddress
   };
 }

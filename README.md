@@ -144,8 +144,8 @@ All integrated endpoints strictly follow the official BNB Chain Hackathon specif
 ```
 
 > [!NOTE]
-> **About Server-Side Binance Agentic Wallet (`baw`) Mode:**  
-> The shared server-side Agentic Wallet mode is strictly an optional local/CLI developer feature disabled by default (`ENABLE_AGENTIC_WALLET=false`). In public multi-user deployments (such as Railway), users connect their own Binance Web3 Wallet extension to guarantee non-custodial ownership and prevent shared server-side wallet states.
+> **About Binance Agentic Wallet (`baw`) Mode:**  
+> In OmniBasket AI, visitors can connect their own keyless Binance Agentic Wallet via Binance mobile app QR code pairing (modeled on the Promptfolio architecture). Sessions are strictly isolated per user with `HttpOnly` cookie-only authentication, post-authorization session rotation, and durable AES-256-GCM encrypted storage. App-level guardrails enforce a $50,000 daily spend ceiling, 0.5% maximum slippage protection, and AutoReject policy on BSC Mainnet (#56). If the Binance pairing gateway is offline or unreachable, the platform fails closed honestly without fabricating synthetic pairing states, allowing users to seamlessly use the self-custody Extension Wallet.
 
 ---
 

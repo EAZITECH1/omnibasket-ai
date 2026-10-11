@@ -1,31 +1,18 @@
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-import { 
-  getSessionIdFromRequest, 
-  checkPairingStatus 
-} from '../../../../../services/userBawSessionManager.js';
+import { checkPairingStatus } from '../../../../../services/userBawSessionManager.js';
 
 export async function GET(req) {
   try {
-    const { searchParams } = new URL(req.url);
-    const qrCodeId = searchParams.get('qrCodeId');
-    const sessionId = searchParams.get('sessionId') || getSessionIdFromRequest(req);
-
-    if (!sessionId) {
-      return Response.json({
-        success: false,
-        error: 'Session ID is required'
-      }, { status: 400 });
-    }
-
-    const result = await checkPairingStatus(sessionId, qrCodeId);
-    return Response.json(result);
+    const result = await checkPairingStatus(req);
+    return Response.json(result, { status: result.status || (result.success ? 200 : 400) });
   } catch (err) {
-    console.error('[API /agentic-wallet/auth/status] Error:', err);
+    console.error('[API /agentic-wallet/auth/status] Error:', err.message);
     return Response.json({
       success: false,
-      error: err.message || 'Status check failed'
+      code: 'INTERNAL_ERROR',
+      error: 'Status check failed'
     }, { status: 500 });
   }
 }

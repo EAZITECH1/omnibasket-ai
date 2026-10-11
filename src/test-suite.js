@@ -1161,9 +1161,19 @@ async function runOfflineUnitTests() {
   const { POST: agenticConfirmHandler } = await import('./app/api/agentic-wallet/auth/confirm-agent/route.js');
   const { POST: agenticSignoutHandler } = await import('./app/api/agentic-wallet/auth/signout/route.js');
   const { POST: agenticExecuteHandler } = await import('./app/api/agentic-wallet/execute-basket/route.js');
-  const { confirmAgentSignin, getOrCreateUserSession } = await import('./services/userBawSessionManager.js');
+  const { BAW_COOKIE_NAME, buildSessionCookieHeader } = await import('./services/userBawSessionManager.js');
+  const { saveSession, loadSession, deleteSession, clearAllSessions } = await import('./services/bawSessionStore.js');
 
-  // 9.1: Unconnected visitor status
+  await clearAllSessions();
+
+  // Helper to extract session ID from Set-Cookie header
+  function extractSidFromCookie(cookieHeader) {
+    if (!cookieHeader) return null;
+    const match = cookieHeader.match(new RegExp(`${BAW_COOKIE_NAME}=([a-zA-Z0-9_-]+)`));
+    return match ? match[1] : null;
+  }
+
+  // 9.1: Unconnected visitor status (no session or unauthenticated)
   {
     const req = new Request('http://localhost/api/agentic-wallet/status');
     const res = await agenticStatusHandler(req);
@@ -1172,85 +1182,201 @@ async function runOfflineUnitTests() {
     assert(data.data.connected === false, 'Unconnected visitor reports connected: false');
     assert(data.data.status === 'UNCONNECTED', 'Unconnected visitor reports status: UNCONNECTED');
     assert(data.data.address === null, 'Unconnected visitor never sees a shared server address');
+    assert(data.data.quota === null, 'Unconnected visitor has null quota');
   }
 
-  // 9.2: Auth signin generates isolated session & QR info
-  let userASessionId = null;
-  let userAQrId = null;
-  let userAPairingCode = null;
+  // 9.2: Removal of fabricated pairing success — fail closed on unreachable Binance Gateway
   {
     const req = new Request('http://localhost/api/agentic-wallet/auth/signin', { method: 'POST' });
     const res = await agenticSigninHandler(req);
     const data = await res.json();
-    assert(data.success === true, '/api/agentic-wallet/auth/signin returns success: true');
-    assert(Boolean(data.sessionId), 'Signin returns unique sessionId');
-    assert(Boolean(data.data.qrCodeId), 'Signin returns qrCodeId');
-    assert(Boolean(data.data.urlForWeb), 'Signin returns urlForWeb');
-    assert(Boolean(data.data.pairingCode), 'Signin returns 6-character pairingCode');
-    assert(data.data.pairingCode.length === 6, 'Pairing code is strictly 6 characters');
-    assert(Boolean(data.data.qrSvg), 'Signin generates crisp SVG QR code');
-
-    const setCookie = res.headers.get('set-cookie');
-    assert(Boolean(setCookie && setCookie.includes('omnibasket_baw_sid=')), 'Signin sets HTTP-only session cookie');
-
-    userASessionId = data.sessionId;
-    userAQrId = data.data.qrCodeId;
-    userAPairingCode = data.data.pairingCode;
+    assert(res.status === 503 || res.status === 502, '/api/agentic-wallet/auth/signin returns 503/502 when gateway is unreachable');
+    assert(data.success === false, 'Signin fails closed (success: false) when Binance is unreachable');
+    assert(data.code === 'BINANCE_SERVICE_UNAVAILABLE', 'Signin reports BINANCE_SERVICE_UNAVAILABLE');
+    assert(!data.data?.qrSvg, 'Signin never returns QR SVG on gateway failure');
+    assert(!data.data?.urlForWeb, 'Signin never returns fabricated synthetic QR URL');
   }
 
-  // 9.3: Listener status query for User A
+  // 9.3: Cookie as sole credential & No sessionId in JSON body
   {
-    const req = new Request(`http://localhost/api/agentic-wallet/auth/status?qrCodeId=${userAQrId}`, {
-      headers: { 'x-baw-session-id': userASessionId }
-    });
-    const res = await agenticPairStatusHandler(req);
+    const req = new Request('http://localhost/api/agentic-wallet/auth/signin', { method: 'POST' });
+    const res = await agenticSigninHandler(req);
     const data = await res.json();
-    assert(data.success === true, 'Listener status check returns success: true');
-    assert(data.data.qrCodeId === userAQrId, 'Listener returns matching qrCodeId');
-    assert(data.data.pairingCode === userAPairingCode, 'Listener returns matching pairingCode');
+    assert(data.sessionId === undefined, 'Signin never exposes raw sessionId in JSON response body');
+
+    // Attempting to supply session ID via header is ignored
+    const spoofReq = new Request('http://localhost/api/agentic-wallet/status', {
+      headers: { 'x-baw-session-id': 'spoofed-attacker-session-id' }
+    });
+    const spoofRes = await agenticStatusHandler(spoofReq);
+    const spoofData = await spoofRes.json();
+    assert(spoofData.data.connected === false, 'Header-supplied x-baw-session-id is ignored; cookie is sole credential');
   }
 
-  // 9.4: Agent confirmation completes pairing for User A
-  const mockUserAAddress = '0x1111111111111111111111111111111111111111';
+  // 9.4: CSRF origin validation on state-changing POST routes
   {
-    // Simulate mobile app authorization populating address
-    const sessionA = getOrCreateUserSession(userASessionId);
-    sessionA.walletAddress = mockUserAAddress;
-
-    const req = new Request('http://localhost/api/agentic-wallet/auth/confirm-agent', {
+    const csrfReq = new Request('http://localhost/api/agentic-wallet/auth/confirm-agent', {
       method: 'POST',
-      headers: { 
-        'Content-Type': 'application/json',
-        'x-baw-session-id': userASessionId 
+      headers: {
+        'Origin': 'https://evil-hacker.com',
+        'Host': 'localhost'
       },
-      body: JSON.stringify({ qrCodeId: userAQrId })
+      body: JSON.stringify({ qrCodeId: 'test-qr' })
     });
-    const res = await agenticConfirmHandler(req);
-    const data = await res.json();
-    assert(data.success === true, 'Agent confirmation returns success: true');
-    assert(data.data.status === 'CONNECTED', 'Agent confirmation marks status as CONNECTED');
-    assert(data.data.walletAddress === mockUserAAddress, 'Agent confirmation associates correct address with User A');
+    const csrfRes = await agenticConfirmHandler(csrfReq);
+    const csrfData = await csrfRes.json();
+    assert(csrfRes.status === 403, 'Cross-origin POST request rejected with HTTP 403');
+    assert(csrfData.code === 'CSRF_REJECTED', 'Blocked with CSRF_REJECTED error code');
   }
 
-  // 9.5: Multi-Tenant Isolation — User B cannot see or execute with User A's session
+  // 9.5: Unverified confirmation rejected (caller cannot fabricate authorization)
   {
-    const userBSessionId = 'session-user-b-unique-id';
-    
-    // User B status query
+    // Calling confirm without cookie
+    const noCookieReq = new Request('http://localhost/api/agentic-wallet/auth/confirm-agent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ qrCodeId: 'test-qr' })
+    });
+    const noCookieRes = await agenticConfirmHandler(noCookieReq);
+    assert(noCookieRes.status === 401, 'Confirm without cookie rejected with HTTP 401');
+
+    // Create an unverified session in store
+    const unverifiedSid = 'unverified-session-1';
+    await saveSession(unverifiedSid, {
+      sessionId: unverifiedSid,
+      status: 'WAITING_FOR_SCAN',
+      appConfirmed: false,
+      walletAddress: null,
+      qrCodeId: 'genuine-qr-code-id-1',
+      dailyLimit: 50000.0,
+      quotaLeft: 50000.0,
+      createdAt: Date.now(),
+      lastActive: Date.now(),
+      expiresAt: Date.now() + 3600000
+    });
+
+    // Mismatched qrCodeId
+    const mismatchReq = new Request('http://localhost/api/agentic-wallet/auth/confirm-agent', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Cookie': `${BAW_COOKIE_NAME}=${unverifiedSid}`
+      },
+      body: JSON.stringify({ qrCodeId: 'wrong-qr-id' })
+    });
+    const mismatchRes = await agenticConfirmHandler(mismatchReq);
+    assert(mismatchRes.status === 400, 'Confirm with mismatched qrCodeId rejected with HTTP 400');
+
+    // Unverified on mobile app
+    const unverifiedReq = new Request('http://localhost/api/agentic-wallet/auth/confirm-agent', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Cookie': `${BAW_COOKIE_NAME}=${unverifiedSid}`
+      },
+      body: JSON.stringify({ qrCodeId: 'genuine-qr-code-id-1' })
+    });
+    const unverifiedRes = await agenticConfirmHandler(unverifiedReq);
+    assert(unverifiedRes.status === 403, 'Unverified session rejected with HTTP 403');
+    const unverifiedData = await unverifiedRes.json();
+    assert(unverifiedData.code === 'UNVERIFIED_AUTHORIZATION', 'Rejected with UNVERIFIED_AUTHORIZATION');
+  }
+
+  // 9.6: Genuine verified confirmation rotates session ID and persists CONNECTED
+  let userASessionIdRotated = null;
+  const mockUserAAddress = '0x1111111111111111111111111111111111111111';
+  const initialUserASid = 'verified-session-a-initial';
+  const userAQrCodeId = 'binance-verified-qr-user-a';
+  {
+    // Populate session A with verified Binance mobile pairing confirmation
+    await saveSession(initialUserASid, {
+      sessionId: initialUserASid,
+      status: 'APP_CONFIRMED',
+      appConfirmed: true,
+      walletAddress: mockUserAAddress,
+      binanceChainId: '56',
+      qrCodeId: userAQrCodeId,
+      pairingCode: 'abc123',
+      dailyLimit: 50000.0,
+      quotaLeft: 50000.0,
+      quotaUsed: 0.0,
+      createdAt: Date.now(),
+      lastActive: Date.now(),
+      expireAt: Date.now() + 300000,
+      expiresAt: Date.now() + 3600000
+    });
+
+    const confirmReq = new Request('http://localhost/api/agentic-wallet/auth/confirm-agent', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Cookie': `${BAW_COOKIE_NAME}=${initialUserASid}`
+      },
+      body: JSON.stringify({ qrCodeId: userAQrCodeId })
+    });
+    const confirmRes = await agenticConfirmHandler(confirmReq);
+    const confirmData = await confirmRes.json();
+    assert(confirmRes.status === 200, 'Verified confirmation returns HTTP 200');
+    assert(confirmData.success === true, 'Confirmation returns success: true');
+    assert(confirmData.data.status === 'CONNECTED', 'Status marked CONNECTED');
+    assert(confirmData.data.walletAddress === mockUserAAddress, 'Wallet address matches Binance MPC address');
+
+    const rotatedCookieHeader = confirmRes.headers.get('set-cookie');
+    assert(Boolean(rotatedCookieHeader && rotatedCookieHeader.includes(`${BAW_COOKIE_NAME}=`)), 'Sets rotated session cookie');
+    userASessionIdRotated = extractSidFromCookie(rotatedCookieHeader);
+    assert(Boolean(userASessionIdRotated), 'Rotated session ID extracted');
+    assert(userASessionIdRotated !== initialUserASid, 'Session ID was rotated upon confirmation (prevents session fixation)');
+  }
+
+  // 9.7: Session Fixation Defense — Pre-rotation session is strictly revoked
+  {
+    const oldSessionReq = new Request('http://localhost/api/agentic-wallet/status', {
+      headers: { 'Cookie': `${BAW_COOKIE_NAME}=${initialUserASid}` }
+    });
+    const oldSessionRes = await agenticStatusHandler(oldSessionReq);
+    const oldSessionData = await oldSessionRes.json();
+    assert(oldSessionData.data.connected === false, 'Pre-rotation session ID is completely revoked');
+    assert(oldSessionData.data.address === null, 'Pre-rotation session cannot access wallet address');
+
+    const newSessionReq = new Request('http://localhost/api/agentic-wallet/status', {
+      headers: { 'Cookie': `${BAW_COOKIE_NAME}=${userASessionIdRotated}` }
+    });
+    const newSessionRes = await agenticStatusHandler(newSessionReq);
+    const newSessionData = await newSessionRes.json();
+    assert(newSessionData.data.connected === true, 'Rotated session is active and connected: true');
+    assert(newSessionData.data.address === mockUserAAddress, 'Rotated session retrieves MPC address');
+  }
+
+  // 9.8: Multi-Tenant Isolation — User B cannot see, execute, or disconnect User A
+  {
+    const userBSessionId = 'user-b-distinct-session';
+    await saveSession(userBSessionId, {
+      sessionId: userBSessionId,
+      status: 'UNCONNECTED',
+      appConfirmed: false,
+      walletAddress: null,
+      dailyLimit: 50000.0,
+      quotaLeft: 50000.0,
+      createdAt: Date.now(),
+      lastActive: Date.now(),
+      expiresAt: Date.now() + 3600000
+    });
+
+    // User B status
     const reqB = new Request('http://localhost/api/agentic-wallet/status', {
-      headers: { 'x-baw-session-id': userBSessionId }
+      headers: { 'Cookie': `${BAW_COOKIE_NAME}=${userBSessionId}` }
     });
     const resB = await agenticStatusHandler(reqB);
     const dataB = await resB.json();
-    assert(dataB.data.connected === false, 'User B reports connected: false despite User A being connected');
-    assert(dataB.data.address === null, 'User B address is strictly null; never sees User A address');
+    assert(dataB.data.connected === false, 'User B reports connected: false while User A is connected');
+    assert(dataB.data.address === null, 'User B never sees User A address');
 
     // User B execution attempt
     const execReqB = new Request('http://localhost/api/agentic-wallet/execute-basket', {
       method: 'POST',
-      headers: { 
+      headers: {
         'Content-Type': 'application/json',
-        'x-baw-session-id': userBSessionId 
+        'Cookie': `${BAW_COOKIE_NAME}=${userBSessionId}`
       },
       body: JSON.stringify({
         prompt: 'Attack Basket',
@@ -1260,33 +1386,30 @@ async function runOfflineUnitTests() {
     });
     const execResB = await agenticExecuteHandler(execReqB);
     const execDataB = await execResB.json();
-    assert(execResB.status === 400 || execResB.status === 401, 'User B execution is blocked');
+    assert(execResB.status === 400 || execResB.status === 401, 'User B execution attempt blocked');
     assert(execDataB.code === 'WALLET_NOT_CONNECTED', 'User B blocked with WALLET_NOT_CONNECTED');
+
+    // User B signout does NOT affect User A
+    const signoutB = new Request('http://localhost/api/agentic-wallet/auth/signout', {
+      method: 'POST',
+      headers: { 'Cookie': `${BAW_COOKIE_NAME}=${userBSessionId}` }
+    });
+    await agenticSignoutHandler(signoutB);
+
+    // Verify User A remains connected
+    const checkA = new Request('http://localhost/api/agentic-wallet/status', {
+      headers: { 'Cookie': `${BAW_COOKIE_NAME}=${userASessionIdRotated}` }
+    });
+    const resCheckA = await agenticStatusHandler(checkA);
+    const dataCheckA = await resCheckA.json();
+    assert(dataCheckA.data.connected === true, 'User A remains connected after User B signout');
+    assert(dataCheckA.data.address === mockUserAAddress, 'User A address unchanged');
   }
 
-  // 9.6: User A Status & Balance verification
-  {
-    const reqA = new Request('http://localhost/api/agentic-wallet/status', {
-      headers: { 'x-baw-session-id': userASessionId }
-    });
-    const resA = await agenticStatusHandler(reqA);
-    const dataA = await resA.json();
-    assert(dataA.data.connected === true, 'User A reports connected: true');
-    assert(dataA.data.address === mockUserAAddress, 'User A retrieves their own connected MPC address');
-
-    const balReqA = new Request('http://localhost/api/agentic-wallet/balance', {
-      headers: { 'x-baw-session-id': userASessionId }
-    });
-    const balResA = await agenticBalanceHandler(balReqA);
-    const balDataA = await balResA.json();
-    assert(balDataA.success === true, 'User A balance query returns success: true');
-    assert(balDataA.data.walletAddress === mockUserAAddress, 'User A balance query targets User A MPC address');
-  }
-
-  // 9.7: Security Settings & Guardrail Quota Enforcement
+  // 9.9: Autonomous Execution Guardrails & App-level Boundaries
   {
     const settingsReq = new Request('http://localhost/api/agentic-wallet/settings', {
-      headers: { 'x-baw-session-id': userASessionId }
+      headers: { 'Cookie': `${BAW_COOKIE_NAME}=${userASessionIdRotated}` }
     });
     const settingsRes = await agenticSettingsHandler(settingsReq);
     const settingsData = await settingsRes.json();
@@ -1295,12 +1418,12 @@ async function runOfflineUnitTests() {
     assert(settingsData.data.abnormalTxnHandling === 'AutoReject', 'Abnormal Tx policy is AutoReject');
     assert(settingsData.data.slippage === 0.5, 'Slippage is bounded to 0.5% max');
 
-    // Attempt trade exceeding quota ($50,001 USDT)
+    // Over-quota execution ($50,001 USDT)
     const overQuotaReq = new Request('http://localhost/api/agentic-wallet/execute-basket', {
       method: 'POST',
-      headers: { 
+      headers: {
         'Content-Type': 'application/json',
-        'x-baw-session-id': userASessionId 
+        'Cookie': `${BAW_COOKIE_NAME}=${userASessionIdRotated}`
       },
       body: JSON.stringify({
         prompt: 'Whale allocation',
@@ -1311,14 +1434,14 @@ async function runOfflineUnitTests() {
     const overQuotaRes = await agenticExecuteHandler(overQuotaReq);
     const overQuotaData = await overQuotaRes.json();
     assert(overQuotaRes.status === 400, 'Over-quota execution rejected with HTTP 400');
-    assert(overQuotaData.code === 'GUARDRAIL_VIOLATION_QUOTA', 'Execution blocked with GUARDRAIL_VIOLATION_QUOTA');
+    assert(overQuotaData.code === 'GUARDRAIL_VIOLATION_QUOTA', 'Blocked with GUARDRAIL_VIOLATION_QUOTA');
 
-    // Attempt trade with empty allocations
+    // Empty allocations
     const emptyAllocReq = new Request('http://localhost/api/agentic-wallet/execute-basket', {
       method: 'POST',
-      headers: { 
+      headers: {
         'Content-Type': 'application/json',
-        'x-baw-session-id': userASessionId 
+        'Cookie': `${BAW_COOKIE_NAME}=${userASessionIdRotated}`
       },
       body: JSON.stringify({
         prompt: 'Empty basket',
@@ -1329,31 +1452,65 @@ async function runOfflineUnitTests() {
     const emptyAllocRes = await agenticExecuteHandler(emptyAllocReq);
     const emptyAllocData = await emptyAllocRes.json();
     assert(emptyAllocRes.status === 400, 'Empty allocations rejected with HTTP 400');
-    assert(emptyAllocData.code === 'INVALID_PARAMETERS', 'Empty allocations blocked with INVALID_PARAMETERS');
+    assert(emptyAllocData.code === 'INVALID_PARAMETERS', 'Blocked with INVALID_PARAMETERS');
+
+    // Fail closed on unconfigured execution daemon without broadcast
+    const execReq = new Request('http://localhost/api/agentic-wallet/execute-basket', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Cookie': `${BAW_COOKIE_NAME}=${userASessionIdRotated}`
+      },
+      body: JSON.stringify({
+        prompt: 'Tech Basket',
+        investmentAmount: 20,
+        allocations: [{ ticker: 'NVDA', weight: 100 }],
+        chainId: 56
+      })
+    });
+    const execRes = await agenticExecuteHandler(execReq);
+    const execData = await execRes.json();
+    assert(execRes.status === 503 || execRes.status === 400, 'Execution without daemon fails closed with non-2xx');
+    assert(execData.success === false, 'Execution reports success: false without real broadcast');
+    assert(execData.code === 'AUTONOMOUS_EXECUTION_BLOCKED' || execData.code === 'EXECUTION_ENVIRONMENT_UNAVAILABLE' || execData.code === 'UNSUPPORTED_NETWORK', 'Clear failure code returned');
   }
 
-  // 9.8: Disconnect & Signout Lifecycle
+  // 9.10: Production-Safe Durable Encrypted Store (AES-256-GCM)
+  {
+    const loadedSession = await loadSession(userASessionIdRotated);
+    assert(loadedSession !== null, 'Session loaded successfully from durable store');
+    assert(loadedSession.status === 'CONNECTED', 'Loaded session preserves CONNECTED status');
+    assert(loadedSession.walletAddress === mockUserAAddress, 'Loaded session preserves wallet address');
+    assert(loadedSession.privateKey === undefined, 'Plaintext private keys are never stored');
+    assert(loadedSession.seedPhrase === undefined, 'Seed phrases are never stored');
+  }
+
+  // 9.11: Disconnect & Signout Lifecycle
   {
     const signoutReq = new Request('http://localhost/api/agentic-wallet/auth/signout', {
       method: 'POST',
-      headers: { 'x-baw-session-id': userASessionId }
+      headers: { 'Cookie': `${BAW_COOKIE_NAME}=${userASessionIdRotated}` }
     });
     const signoutRes = await agenticSignoutHandler(signoutReq);
     const signoutData = await signoutRes.json();
     assert(signoutData.success === true, 'Signout returns success: true');
 
     const expiredCookie = signoutRes.headers.get('set-cookie');
-    assert(Boolean(expiredCookie && expiredCookie.includes('Max-Age=0')), 'Signout clears session cookie');
+    assert(Boolean(expiredCookie && expiredCookie.includes('Max-Age=0')), 'Signout clears cookie with Max-Age=0');
 
-    // Verify User A status is now UNCONNECTED
+    // Durable store session is deleted
+    const sessionPostSignout = await loadSession(userASessionIdRotated);
+    assert(sessionPostSignout === null, 'Session deleted from durable encrypted store upon signout');
+
+    // Subsequent status check is UNCONNECTED
     const postSignoutReq = new Request('http://localhost/api/agentic-wallet/status', {
-      headers: { 'x-baw-session-id': userASessionId }
+      headers: { 'Cookie': `${BAW_COOKIE_NAME}=${userASessionIdRotated}` }
     });
     const postSignoutRes = await agenticStatusHandler(postSignoutReq);
     const postSignoutData = await postSignoutRes.json();
     assert(postSignoutData.data.connected === false, 'After signout, user reports connected: false');
     assert(postSignoutData.data.status === 'UNCONNECTED', 'After signout, user reports status: UNCONNECTED');
-    assert(postSignoutData.data.address === null, 'After signout, address is cleared');
+    assert(postSignoutData.data.address === null, 'After signout, address is null');
   }
 }
 

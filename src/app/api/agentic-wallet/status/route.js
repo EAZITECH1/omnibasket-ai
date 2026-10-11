@@ -1,22 +1,18 @@
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-import { 
-  getSessionIdFromRequest, 
-  getUserStatus 
-} from '../../../../services/userBawSessionManager.js';
+import { getUserStatus } from '../../../../services/userBawSessionManager.js';
 
 export async function GET(req) {
   try {
-    const { searchParams } = new URL(req.url);
-    const sessionId = searchParams.get('sessionId') || getSessionIdFromRequest(req);
-    const status = getUserStatus(sessionId);
-    return Response.json(status);
+    const status = await getUserStatus(req);
+    return Response.json(status, { status: status.status || 200 });
   } catch (err) {
-    console.error('[API /agentic-wallet/status] Error:', err);
+    console.error('[API /agentic-wallet/status] Error:', err.message);
     return Response.json({
       success: false,
-      error: err.message || 'Failed to query Agentic Wallet status'
+      code: 'INTERNAL_ERROR',
+      error: 'Failed to query Agentic Wallet status'
     }, { status: 500 });
   }
 }

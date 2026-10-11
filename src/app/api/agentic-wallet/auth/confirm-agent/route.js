@@ -1,35 +1,33 @@
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-import { 
-  getSessionIdFromRequest, 
-  confirmAgentSignin 
-} from '../../../../../services/userBawSessionManager.js';
+import { confirmAgentSignin } from '../../../../../services/userBawSessionManager.js';
 
 export async function POST(req) {
   try {
-    let body = {};
-    try {
-      body = await req.json();
-    } catch (_) {}
+    const body = await req.json().catch(() => ({}));
+    const result = await confirmAgentSignin(req, body);
 
-    const { qrCodeId, confirmWord } = body;
-    const sessionId = body.sessionId || getSessionIdFromRequest(req);
-
-    if (!sessionId) {
-      return Response.json({
-        success: false,
-        error: 'Session ID is required'
-      }, { status: 400 });
+    const headers = new Headers();
+    headers.set('Content-Type', 'application/json');
+    if (result.cookieHeader) {
+      headers.set('Set-Cookie', result.cookieHeader);
     }
 
-    const result = await confirmAgentSignin(sessionId, { qrCodeId, confirmWord });
-    return Response.json(result);
+    const jsonBody = { ...result };
+    delete jsonBody.rotatedSessionId;
+    delete jsonBody.cookieHeader;
+
+    return new Response(JSON.stringify(jsonBody), {
+      status: result.status || (result.success ? 200 : 400),
+      headers
+    });
   } catch (err) {
-    console.error('[API /agentic-wallet/auth/confirm-agent] Error:', err);
+    console.error('[API /agentic-wallet/auth/confirm-agent] Error:', err.message);
     return Response.json({
       success: false,
-      error: err.message || 'Agent confirmation failed'
+      code: 'INTERNAL_ERROR',
+      error: 'Agent confirmation failed'
     }, { status: 500 });
   }
 }

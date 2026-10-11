@@ -52,6 +52,7 @@ export default function WalletModal() {
   // Agentic pairing flow states
   const [activeTab, setActiveTab] = useState(modalTab || 'pairing'); // 'guardrails' | 'pairing'
   const [qrLoading, setQrLoading] = useState(false);
+  const [pairingError, setPairingError] = useState(null);
   const [pairingData, setPairingData] = useState(null);
   const [listenerText, setListenerText] = useState('Listening for Binance App scan & confirmation...');
   const [isAppConfirmed, setIsAppConfirmed] = useState(false);
@@ -86,6 +87,7 @@ export default function WalletModal() {
   // 1. Initiate Pairing Session (POST /api/agentic-wallet/auth/signin)
   const initiatePairing = useCallback(async () => {
     setQrLoading(true);
+    setPairingError(null);
     setIsAppConfirmed(false);
     setShowConfirmModal(false);
     setListenerText('Listening for Binance App scan & confirmation...');
@@ -97,11 +99,17 @@ export default function WalletModal() {
       });
       const data = await res.json();
 
-      if (data?.success && data?.data) {
+      if (res.ok && data?.success && data?.data) {
         setPairingData(data.data);
+      } else {
+        const errorMsg = data?.error || 'Binance Agentic Wallet pairing service is currently unavailable. Please verify connectivity or use Extension Wallet.';
+        setPairingError(errorMsg);
+        setPairingData(null);
       }
     } catch (err) {
       console.warn('Failed to initiate pairing:', err);
+      setPairingError('Network error connecting to Binance Agentic Wallet pairing service.');
+      setPairingData(null);
     } finally {
       setQrLoading(false);
     }
@@ -367,7 +375,7 @@ export default function WalletModal() {
                 {/* Guardrails Active Notice */}
                 <div className="border border-foreground/20 bg-background p-2.5 text-[11px] text-muted-foreground flex items-center gap-2">
                   <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
-                  <span>Guardrails Active: Maximum 0.5% slippage, AutoReject high risk, $50,000 daily spend limit.</span>
+                  <span>App-level Guardrails Active: Maximum 0.5% slippage ceiling, AutoReject high risk, $50,000 daily spend limit on BSC Mainnet #56.</span>
                 </div>
               </div>
             ) : (
@@ -406,7 +414,7 @@ export default function WalletModal() {
                       <div className="border border-foreground/30 bg-background p-3">
                         <span className="text-[10px] text-muted-foreground uppercase block mb-1">Daily Spend Limit</span>
                         <h4 className="text-sm font-black text-bnb-yellow">$50,000.00 USDT</h4>
-                        <p className="text-[10px] text-muted-foreground mt-1">Enforced via Binance App</p>
+                        <p className="text-[10px] text-muted-foreground mt-1">Enforced via App Guardrails &amp; Binance MPC</p>
                       </div>
                       <div className="border border-foreground/30 bg-background p-3">
                         <span className="text-[10px] text-muted-foreground uppercase block mb-1">Remaining 24h Quota</span>
@@ -416,7 +424,7 @@ export default function WalletModal() {
                       <div className="border border-foreground/30 bg-background p-3">
                         <span className="text-[10px] text-muted-foreground uppercase block mb-1">Abnormal Tx Policy</span>
                         <h4 className="text-sm font-black">AutoReject</h4>
-                        <p className="text-[10px] text-muted-foreground mt-1">Blocks high-slippage & risk breaches</p>
+                        <p className="text-[10px] text-muted-foreground mt-1">Blocks high-slippage &amp; risk breaches</p>
                       </div>
                       <div className="border border-foreground/30 bg-background p-3">
                         <span className="text-[10px] text-muted-foreground uppercase block mb-1">Slippage Ceiling</span>
@@ -443,106 +451,138 @@ export default function WalletModal() {
                 {/* Sub-Tab 2: Binance App Pairing (QR Code) */}
                 {activeTab === 'pairing' && (
                   <div className="space-y-4 mb-6 font-mono">
-                    <p className="text-xs text-muted-foreground">
-                      Scan this QR code with your <strong>Binance App</strong> to pair this agent session with your MPC keyless wallet:
-                    </p>
-
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-center bg-background border border-foreground/40 p-4">
-                      {/* Scannable QR Frame */}
-                      <div className="flex flex-col items-center justify-center p-2 bg-white rounded border border-foreground/20">
-                        {qrLoading ? (
-                          <div className="h-44 w-44 flex flex-col items-center justify-center text-black text-xs gap-2">
-                            <RefreshCw className="w-6 h-6 animate-spin text-bnb-yellow" />
-                            <span>Generating QR...</span>
-                          </div>
-                        ) : pairingData?.qrSvg ? (
-                          <div 
-                            className="w-44 h-44 flex items-center justify-center [&>svg]:w-full [&>svg]:h-full"
-                            dangerouslySetInnerHTML={{ __html: pairingData.qrSvg }}
-                          />
-                        ) : (
-                          <div className="h-44 w-44 flex flex-col items-center justify-center text-black text-xs text-center p-2">
-                            <span>Scanning URL:</span>
-                            <span className="text-[10px] text-muted-foreground break-all">{pairingData?.urlForWeb}</span>
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Pairing Details Panel */}
-                      <div className="space-y-3 text-xs">
-                        {/* Pairing Code Card */}
-                        <div className="border border-foreground/30 p-2.5 bg-card">
-                          <span className="text-[10px] text-muted-foreground block uppercase">Pairing Session Code</span>
-                          <div className="flex items-center justify-between mt-1">
-                            <span className="font-mono font-black text-lg tracking-widest text-bnb-yellow">
-                              {pairingData?.pairingCode || '------'}
-                            </span>
-                            <button
-                              onClick={handleCopyPairingCode}
-                              className="border border-foreground/40 px-2 py-1 hover:bg-foreground hover:text-background transition-colors flex items-center gap-1 text-[10px] font-bold"
-                            >
-                              {copiedPairingCode ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
-                              <span>{copiedPairingCode ? 'COPIED' : 'COPY'}</span>
-                            </button>
-                          </div>
+                    {pairingError ? (
+                      <div className="border-2 border-red-500 bg-red-950/20 p-5 space-y-4 font-mono text-center">
+                        <div className="mx-auto w-10 h-10 border-2 border-red-500 bg-background flex items-center justify-center text-red-400">
+                          <AlertTriangle className="w-5 h-5" />
                         </div>
-
-                        {/* Live Listener Status */}
-                        <div className="border border-emerald-500/40 bg-emerald-950/20 p-2.5 flex items-center gap-2 text-[11px]">
-                          <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse shrink-0"></span>
-                          <span className="text-emerald-300 truncate">{listenerText}</span>
+                        <div className="space-y-1">
+                          <h4 className="font-bold text-red-400 uppercase text-xs">Binance Pairing Unavailable</h4>
+                          <p className="text-[11px] text-muted-foreground leading-relaxed max-w-md mx-auto">
+                            {pairingError}
+                          </p>
                         </div>
-
-                        {/* Steps Guide */}
-                        <div className="space-y-1.5 text-[11px] text-muted-foreground">
-                          <div className="flex items-start gap-1.5">
-                            <span className="h-4 w-4 rounded-full bg-bnb-yellow text-black flex items-center justify-center font-bold text-[9px] shrink-0">1</span>
-                            <span>Open <strong>Binance App</strong> &gt; Tap QR Scanner</span>
-                          </div>
-                          <div className="flex items-start gap-1.5">
-                            <span className="h-4 w-4 rounded-full bg-bnb-yellow text-black flex items-center justify-center font-bold text-[9px] shrink-0">2</span>
-                            <span>Point camera at the QR code to verify session</span>
-                          </div>
-                          <div className="flex items-start gap-1.5">
-                            <span className="h-4 w-4 rounded-full bg-bnb-yellow text-black flex items-center justify-center font-bold text-[9px] shrink-0">3</span>
-                            <span>Authorize MPC keyless wallet &amp; guardrails</span>
-                          </div>
-                        </div>
-
-                        {/* Trigger for Agent Confirmation if App Confirmed */}
-                        {isAppConfirmed && (
-                          <button
-                            onClick={() => setShowConfirmModal(true)}
-                            className="w-full border-2 border-foreground bg-bnb-yellow text-black font-black uppercase py-2 text-xs hover:bg-white transition-colors cursor-pointer flex items-center justify-center gap-1.5"
-                          >
-                            <CheckCircle2 className="w-4 h-4 text-black" />
-                            <span>Confirm Sign-In in Agent</span>
-                          </button>
-                        )}
-
-                        {/* Actions Row */}
-                        <div className="flex items-center gap-2 pt-1">
-                          {pairingData?.urlForWeb && (
-                            <a
-                              href={pairingData.urlForWeb}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="border border-foreground/40 px-2 py-1 text-[10px] hover:bg-foreground hover:text-background transition-colors flex items-center gap-1 text-muted-foreground"
-                            >
-                              <span>Direct Link</span>
-                              <ExternalLink className="w-3 h-3" />
-                            </a>
-                          )}
+                        <div className="flex items-center justify-center gap-3 pt-2">
                           <button
                             onClick={initiatePairing}
-                            className="border border-foreground/40 px-2 py-1 text-[10px] hover:bg-foreground hover:text-background transition-colors flex items-center gap-1 text-muted-foreground cursor-pointer"
+                            className="border-2 border-foreground bg-bnb-yellow text-black font-bold uppercase text-xs px-4 py-2 hover:bg-white transition-colors cursor-pointer flex items-center gap-1.5"
                           >
-                            <RefreshCw className="w-3 h-3" />
-                            <span>Refresh QR</span>
+                            <RefreshCw className="w-3.5 h-3.5" />
+                            <span>Retry Pairing</span>
+                          </button>
+                          <button
+                            onClick={() => setWalletMode('extension')}
+                            className="border border-foreground px-4 py-2 uppercase font-bold text-xs hover:bg-foreground hover:text-background transition-colors cursor-pointer flex items-center gap-1.5"
+                          >
+                            <Wallet className="w-3.5 h-3.5" />
+                            <span>Use Extension Wallet</span>
                           </button>
                         </div>
                       </div>
-                    </div>
+                    ) : (
+                      <>
+                        <p className="text-xs text-muted-foreground">
+                          Scan this QR code with your <strong>Binance App</strong> to pair this agent session with your MPC keyless wallet:
+                        </p>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-center bg-background border border-foreground/40 p-4">
+                          {/* Scannable QR Frame */}
+                          <div className="flex flex-col items-center justify-center p-2 bg-white rounded border border-foreground/20">
+                            {qrLoading ? (
+                              <div className="h-44 w-44 flex flex-col items-center justify-center text-black text-xs gap-2">
+                                <RefreshCw className="w-6 h-6 animate-spin text-bnb-yellow" />
+                                <span>Generating QR...</span>
+                              </div>
+                            ) : pairingData?.qrSvg ? (
+                              <div 
+                                className="w-44 h-44 flex items-center justify-center [&>svg]:w-full [&>svg]:h-full"
+                                dangerouslySetInnerHTML={{ __html: pairingData.qrSvg }}
+                              />
+                            ) : (
+                              <div className="h-44 w-44 flex flex-col items-center justify-center text-black text-xs text-center p-2">
+                                <span className="text-[10px] text-muted-foreground">Waiting for pairing session...</span>
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Pairing Details Panel */}
+                          <div className="space-y-3 text-xs">
+                            {/* Pairing Code Card */}
+                            <div className="border border-foreground/30 p-2.5 bg-card">
+                              <span className="text-[10px] text-muted-foreground block uppercase">Pairing Session Code</span>
+                              <div className="flex items-center justify-between mt-1">
+                                <span className="font-mono font-black text-lg tracking-widest text-bnb-yellow">
+                                  {pairingData?.pairingCode || '------'}
+                                </span>
+                                <button
+                                  onClick={handleCopyPairingCode}
+                                  disabled={!pairingData?.pairingCode}
+                                  className="border border-foreground/40 px-2 py-1 hover:bg-foreground hover:text-background transition-colors flex items-center gap-1 text-[10px] font-bold disabled:opacity-40"
+                                >
+                                  {copiedPairingCode ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                                  <span>{copiedPairingCode ? 'COPIED' : 'COPY'}</span>
+                                </button>
+                              </div>
+                            </div>
+
+                            {/* Live Listener Status */}
+                            <div className="border border-emerald-500/40 bg-emerald-950/20 p-2.5 flex items-center gap-2 text-[11px]">
+                              <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse shrink-0"></span>
+                              <span className="text-emerald-300 truncate">{listenerText}</span>
+                            </div>
+
+                            {/* Steps Guide */}
+                            <div className="space-y-1.5 text-[11px] text-muted-foreground">
+                              <div className="flex items-start gap-1.5">
+                                <span className="h-4 w-4 rounded-full bg-bnb-yellow text-black flex items-center justify-center font-bold text-[9px] shrink-0">1</span>
+                                <span>Open <strong>Binance App</strong> &gt; Tap QR Scanner</span>
+                              </div>
+                              <div className="flex items-start gap-1.5">
+                                <span className="h-4 w-4 rounded-full bg-bnb-yellow text-black flex items-center justify-center font-bold text-[9px] shrink-0">2</span>
+                                <span>Point camera at the QR code to verify session</span>
+                              </div>
+                              <div className="flex items-start gap-1.5">
+                                <span className="h-4 w-4 rounded-full bg-bnb-yellow text-black flex items-center justify-center font-bold text-[9px] shrink-0">3</span>
+                                <span>Authorize MPC keyless wallet &amp; guardrails</span>
+                              </div>
+                            </div>
+
+                            {/* Trigger for Agent Confirmation if App Confirmed */}
+                            {isAppConfirmed && (
+                              <button
+                                onClick={() => setShowConfirmModal(true)}
+                                className="w-full border-2 border-foreground bg-bnb-yellow text-black font-black uppercase py-2 text-xs hover:bg-white transition-colors cursor-pointer flex items-center justify-center gap-1.5"
+                              >
+                                <CheckCircle2 className="w-4 h-4 text-black" />
+                                <span>Confirm Sign-In in Agent</span>
+                              </button>
+                            )}
+
+                            {/* Actions Row */}
+                            <div className="flex items-center gap-2 pt-1">
+                              {pairingData?.urlForWeb && (
+                                <a
+                                  href={pairingData.urlForWeb}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="border border-foreground/40 px-2 py-1 text-[10px] hover:bg-foreground hover:text-background transition-colors flex items-center gap-1 text-muted-foreground"
+                                >
+                                  <span>Direct Link</span>
+                                  <ExternalLink className="w-3 h-3" />
+                                </a>
+                              )}
+                              <button
+                                onClick={initiatePairing}
+                                className="border border-foreground/40 px-2 py-1 text-[10px] hover:bg-foreground hover:text-background transition-colors flex items-center gap-1 text-muted-foreground cursor-pointer"
+                              >
+                                <RefreshCw className="w-3 h-3" />
+                                <span>Refresh QR</span>
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      </>
+                    )}
                   </div>
                 )}
               </div>

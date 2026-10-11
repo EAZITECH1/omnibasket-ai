@@ -1,29 +1,23 @@
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-import { 
-  getSessionIdFromRequest, 
-  getUserStatus 
-} from '../../../../services/userBawSessionManager.js';
+import { getUserStatus } from '../../../../services/userBawSessionManager.js';
 
 export async function GET(req) {
   // Check if calling user has an isolated authenticated session
-  const sessionId = getSessionIdFromRequest(req);
-  if (sessionId) {
-    const userStatus = getUserStatus(sessionId);
-    if (userStatus.data?.connected) {
-      return Response.json({
-        success: true,
-        mode: 'agentic',
-        enabled: true,
-        connected: true,
-        address: userStatus.data.address,
-        status: userStatus.data.status,
-        chainId: 56,
-        network: 'BNB Smart Chain (BSC)',
-        quota: userStatus.data.quota
-      });
-    }
+  const userStatus = await getUserStatus(req);
+  if (userStatus.data?.connected) {
+    return Response.json({
+      success: true,
+      mode: 'agentic',
+      enabled: true,
+      connected: true,
+      address: userStatus.data.address,
+      status: userStatus.data.status,
+      chainId: 56,
+      network: 'BNB Smart Chain (BSC)',
+      quota: userStatus.data.quota
+    });
   }
 
   // Without a connected personal session, report public state (never return a shared server address)
