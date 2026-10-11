@@ -14,11 +14,7 @@ export async function fetchWithX402Payment(targetUrl, options = {}) {
     steps: []
   };
 
-  const isExplicitDemo = options.isDemo === true ||
-                         process.env.ALLOW_DEMO_SIGNATURES === 'true' || 
-                         process.env.NEXT_PUBLIC_DEMO_MODE === 'true' ||
-                         targetUrl?.includes('/demo') ||
-                         targetUrl?.includes('x402-demo');
+  const isExplicitDemo = options.isDemo === true || process.env.ALLOW_DEMO_SIGNATURES === 'true';
 
   // Step 1: Initial Request (Expect HTTP 402)
   trace.steps.push({ step: 1, name: 'INITIAL_REQUEST', status: 'DISPATCHING' });
@@ -103,14 +99,21 @@ export async function fetchWithX402Payment(targetUrl, options = {}) {
       throw new Error(`Production x402 signing failed via baw on BSC: ${err.message || 'Signature authorization rejected'}`);
     }
 
-    // Sandbox / demonstration fallback only: formulate clearly tagged demonstration signature
+    // Sandbox / demonstration fallback only: formulate clearly tagged demonstration signature with full schema
+    const cleanPaymentId = (paymentId || '721677d83e8d460db58efea3540d16bd').replace(/-/g, '');
     const simSigPayload = {
       x402Version: 2,
       paymentId,
       network: 'eip155:56',
+      asset: '0x55d398326f99059fF775485246999027B3197955',
       token: '0x55d398326f99059fF775485246999027B3197955',
       amount: '10000000000000000',
+      payTo: '0x03A48c451B8cbE0bed6172eeaaE84a9B20505283',
+      from: '0x03A48c451B8cbE0bed6172eeaaE84a9B20505283',
       signedBy: '0x03A48c451B8cbE0bed6172eeaaE84a9B20505283',
+      validBefore: Math.floor(Date.now() / 1000) + 3600,
+      validAfter: Math.floor(Date.now() / 1000) - 60,
+      nonce: `0x${cleanPaymentId.padEnd(64, '0').slice(0, 64)}`,
       timestamp: Date.now(),
       demoMode: true
     };

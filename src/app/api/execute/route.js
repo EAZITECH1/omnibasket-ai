@@ -20,12 +20,11 @@ export async function POST(req) {
     }
 
     // Server-side authorization check for estimated off-hours overrides
-    const serverAllowsEstimated = process.env.ALLOW_ESTIMATED_TRADES === 'true' ||
-                                  process.env.ALLOW_DEMO_EXECUTION === 'true' ||
-                                  process.env.NEXT_PUBLIC_DEMO_MODE === 'true';
+    // Strictly uses private server variables or admin authorization (never client-exposed NEXT_PUBLIC_* variables)
+    const serverAllowsEstimated = process.env.ALLOW_ESTIMATED_TRADES === 'true';
     const isAuthorizedOverride = (allowEstimated === true) && (
       serverAllowsEstimated ||
-      (process.env.ADMIN_API_KEY && req.headers.get('x-admin-key') === process.env.ADMIN_API_KEY)
+      (Boolean(process.env.ADMIN_API_KEY) && req.headers.get('x-admin-key') === process.env.ADMIN_API_KEY)
     );
 
     // Pre-Transaction Simulation Guardrail: Fail-Closed Policy

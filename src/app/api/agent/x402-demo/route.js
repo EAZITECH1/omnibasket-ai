@@ -6,7 +6,7 @@ export async function POST(req) {
     const protocol = host.includes('localhost') ? 'http' : 'https';
     const targetUrl = `${protocol}://${host}/api/rwa/alpha-feed`;
 
-    const result = await fetchWithX402Payment(targetUrl);
+    const result = await fetchWithX402Payment(targetUrl, { isDemo: true });
 
     return Response.json(result);
   } catch (error) {

@@ -1,7 +1,7 @@
-/**
- * x402 (HTTP 402 Payment Required) Paywalled RWA Alpha Feed Endpoint
- * Compliant with x402 v2 and Binance Agentic Wallet (`baw x402-payment`)
- */
+import { verifyTypedData } from 'viem';
+
+// In-memory replay protection cache for consumed EIP-3009 nonces
+const spentNonces = new Set();
 
 const USDT_BSC = '0x55d398326f99059fF775485246999027B3197955';
 const MERCHANT_WALLET = '0x03A48c451B8cbE0bed6172eeaaE84a9B20505283';
@@ -53,7 +53,7 @@ async function handleRequest(req) {
     });
   }
 
-  // Parse and structurally/cryptographically verify payment authorization
+  // Parse incoming payment authorization header
   let paymentPayload = null;
   try {
     let decoded = '';
@@ -64,12 +64,6 @@ async function handleRequest(req) {
       paymentPayload = JSON.parse(authHeader);
     }
   } catch (err) {
-    if (/^0x[a-fA-F0-9]{130,}$/.test(authHeader.trim())) {
-      paymentPayload = { signature: authHeader.trim(), network: 'eip155:56', token: USDT_BSC };
-    }
-  }
-
-  if (!paymentPayload || typeof paymentPayload !== 'object') {
     return Response.json({
       error: 'Invalid x402 payment authorization: malformed signature format.',
       requiredScheme: 'exact',
@@ -78,63 +72,206 @@ async function handleRequest(req) {
     }, { status: 400 });
   }
 
-  // 1. Enforce settlement network is strictly BNB Smart Chain (eip155:56)
-  const payloadNetwork = paymentPayload.network || paymentPayload.authorization?.network;
-  if (payloadNetwork && payloadNetwork !== 'eip155:56') {
+  if (!paymentPayload || typeof paymentPayload !== 'object' || Array.isArray(paymentPayload)) {
     return Response.json({
-      error: `Network mismatch: expected eip155:56 (BNB Smart Chain), got ${payloadNetwork}`,
+      error: 'Invalid x402 payment authorization: payload must be a JSON object.',
+      requiredScheme: 'exact',
+      network: 'eip155:56',
+      asset: USDT_BSC
+    }, { status: 400 });
+  }
+
+  // Extract authorization fields (support top-level or nested message/authorization structure)
+  const authObj = paymentPayload.authorization || paymentPayload.message || paymentPayload;
+
+  // 1. Mandatory Network Verification (strictly eip155:56, never defaulted)
+  const network = paymentPayload.network || authObj.network;
+  if (!network) {
+    return Response.json({
+      error: 'Missing required field: network. Authorization must specify eip155:56.',
+      expectedNetwork: 'eip155:56'
+    }, { status: 400 });
+  }
+  if (network !== 'eip155:56') {
+    return Response.json({
+      error: `Network mismatch: expected eip155:56 (BNB Smart Chain), got ${network}`,
       expectedNetwork: 'eip155:56'
     }, { status: 400 });
   }
 
-  // 2. Enforce payment asset is strictly USDT on BSC
-  const token = paymentPayload.token || paymentPayload.asset || paymentPayload.authorization?.token;
-  if (token && token.toLowerCase() !== USDT_BSC.toLowerCase()) {
+  // 2. Mandatory Asset Verification (strictly BSC USDT, never defaulted)
+  const asset = paymentPayload.asset || paymentPayload.token || authObj.asset || authObj.token;
+  if (!asset) {
     return Response.json({
-      error: `Asset mismatch: expected BSC USDT (${USDT_BSC}), got ${token}`,
+      error: `Missing required field: asset. Authorization must specify BSC USDT (${USDT_BSC}).`,
+      expectedAsset: USDT_BSC
+    }, { status: 400 });
+  }
+  if (asset.toLowerCase() !== USDT_BSC.toLowerCase()) {
+    return Response.json({
+      error: `Asset mismatch: expected BSC USDT (${USDT_BSC}), got ${asset}`,
       expectedAsset: USDT_BSC
     }, { status: 400 });
   }
 
-  // 3. Enforce micropayment amount meets requirement (0.01 USDT = 10000000000000000 wei)
-  const amountStr = (paymentPayload.amount || paymentPayload.authorization?.value || '10000000000000000').toString();
+  // 3. Mandatory Micropayment Amount Verification (>= 0.01 USDT, never defaulted)
+  const rawAmount = paymentPayload.amount ?? authObj.amount ?? authObj.value;
+  if (rawAmount === undefined || rawAmount === null || rawAmount === '') {
+    return Response.json({
+      error: 'Missing required field: amount. Authorization must specify payment amount in wei.',
+      requiredAmount: '10000000000000000'
+    }, { status: 400 });
+  }
   try {
-    const amountBig = BigInt(amountStr.replace(/n$/, ''));
+    const amountBig = BigInt(rawAmount.toString().replace(/n$/, ''));
     const minRequired = BigInt('10000000000000000'); // 0.01 USDT with 18 decimals
     if (amountBig < minRequired) {
       return Response.json({
-        error: 'Insufficient micropayment amount: required at least 0.01 USDT.',
-        requiredAmount: '10000000000000000'
+        error: 'Insufficient micropayment amount: required at least 0.01 USDT (10000000000000000 wei).',
+        requiredAmount: '10000000000000000',
+        receivedAmount: rawAmount.toString()
       }, { status: 402 });
     }
   } catch (_) {
-    return Response.json({ error: 'Invalid micropayment amount representation.' }, { status: 400 });
+    return Response.json({ error: 'Invalid micropayment amount: must be valid numeric wei.' }, { status: 400 });
   }
 
-  // 4. Validate timestamp / deadline freshness if provided
-  if (paymentPayload.timestamp) {
-    const ageMs = Date.now() - Number(paymentPayload.timestamp);
-    if (ageMs > 3600000 || ageMs < -300000) {
-      return Response.json({
-        error: 'Expired payment signature timestamp. Fresh authorization required.',
-        timestamp: paymentPayload.timestamp
-      }, { status: 400 });
-    }
-  }
-
-  if (paymentPayload.validBefore && Number(paymentPayload.validBefore) < Math.floor(Date.now() / 1000)) {
+  // 4. Mandatory Recipient Verification (strictly MERCHANT_WALLET, never defaulted)
+  const payTo = paymentPayload.payTo || paymentPayload.to || authObj.payTo || authObj.to;
+  if (!payTo) {
     return Response.json({
-      error: 'EIP-3009 transfer authorization expired (validBefore passed).',
-      validBefore: paymentPayload.validBefore
+      error: `Missing required field: payTo. Authorization must be addressed to merchant (${MERCHANT_WALLET}).`,
+      expectedRecipient: MERCHANT_WALLET
+    }, { status: 400 });
+  }
+  if (payTo.toLowerCase() !== MERCHANT_WALLET.toLowerCase()) {
+    return Response.json({
+      error: `Recipient mismatch: expected ${MERCHANT_WALLET}, got ${payTo}`,
+      expectedRecipient: MERCHANT_WALLET
     }, { status: 400 });
   }
 
-  // 5. Check if demo mode was submitted in production
-  if (paymentPayload.demoMode && process.env.NODE_ENV === 'production' && process.env.ALLOW_DEMO_SIGNATURES !== 'true') {
+  // 5. Mandatory Deadline Verification (strictly validBefore > current unix timestamp, never defaulted)
+  const validBefore = paymentPayload.validBefore ?? authObj.validBefore;
+  if (validBefore === undefined || validBefore === null || validBefore === '') {
     return Response.json({
-      error: 'Demo payment signatures rejected on production BSC Mainnet.',
-      mode: 'PRODUCTION_ENFORCED'
-    }, { status: 403 });
+      error: 'Missing required field: validBefore. Authorization deadline must be specified.',
+    }, { status: 400 });
+  }
+  const nowUnix = Math.floor(Date.now() / 1000);
+  if (Number(validBefore) <= nowUnix) {
+    return Response.json({
+      error: `EIP-3009 transfer authorization expired (validBefore ${validBefore} <= current time ${nowUnix}).`,
+      validBefore,
+      currentTime: nowUnix
+    }, { status: 400 });
+  }
+
+  // Validate validAfter if provided
+  const validAfter = paymentPayload.validAfter ?? authObj.validAfter;
+  if (validAfter !== undefined && validAfter !== null && Number(validAfter) > nowUnix) {
+    return Response.json({
+      error: `EIP-3009 transfer authorization not yet valid (validAfter ${validAfter} > current time ${nowUnix}).`,
+      validAfter,
+      currentTime: nowUnix
+    }, { status: 400 });
+  }
+
+  // 6. Mandatory Nonce Verification & Replay Protection (never defaulted)
+  const nonce = paymentPayload.nonce || authObj.nonce || paymentPayload.paymentId;
+  if (!nonce) {
+    return Response.json({
+      error: 'Missing required field: nonce. Replay protection nonce required.',
+    }, { status: 400 });
+  }
+  if (spentNonces.has(nonce)) {
+    return Response.json({
+      error: `Replay attack detected: authorization nonce ${nonce} has already been spent.`,
+      nonce
+    }, { status: 409 });
+  }
+
+  // 7. Fail-Closed Demo Signature Enforcement
+  const isDemoPayload = paymentPayload.demoMode === true || authObj.demoMode === true;
+  if (isDemoPayload) {
+    if (process.env.ALLOW_DEMO_SIGNATURES !== 'true') {
+      return Response.json({
+        error: 'Demo payment signatures rejected. Production BSC Mainnet settlement required.',
+        mode: 'PRODUCTION_ENFORCED'
+      }, { status: 403 });
+    }
+  }
+
+  // 8. Cryptographic EIP-3009 Signature Verification (when running in production)
+  const signature = paymentPayload.signature || authObj.signature;
+  const signerAddress = paymentPayload.from || authObj.from || paymentPayload.signedBy || authObj.signedBy;
+  if (!isDemoPayload) {
+    if (!signature) {
+      return Response.json({
+        error: 'Missing required field: cryptographic signature for EIP-3009 transfer authorization.',
+      }, { status: 400 });
+    }
+    if (!signerAddress || !/^0x[a-fA-F0-9]{40}$/.test(signerAddress)) {
+      return Response.json({
+        error: 'Missing or invalid signer address (from) for EIP-3009 transfer authorization.',
+      }, { status: 400 });
+    }
+
+    try {
+      const cleanNonce = nonce.replace(/-/g, '');
+      const formattedNonce = cleanNonce.startsWith('0x') && cleanNonce.length === 66 
+        ? cleanNonce 
+        : `0x${cleanNonce.padEnd(64, '0').slice(0, 64)}`;
+
+      const isVerified = await verifyTypedData({
+        address: signerAddress,
+        domain: {
+          name: 'Tether USD',
+          version: '1',
+          chainId: 56,
+          verifyingContract: USDT_BSC
+        },
+        types: {
+          TransferWithAuthorization: [
+            { name: 'from', type: 'address' },
+            { name: 'to', type: 'address' },
+            { name: 'value', type: 'uint256' },
+            { name: 'validAfter', type: 'uint256' },
+            { name: 'validBefore', type: 'uint256' },
+            { name: 'nonce', type: 'bytes32' }
+          ]
+        },
+        primaryType: 'TransferWithAuthorization',
+        message: {
+          from: signerAddress,
+          to: MERCHANT_WALLET,
+          value: BigInt(rawAmount.toString().replace(/n$/, '')),
+          validAfter: BigInt(validAfter || 0),
+          validBefore: BigInt(validBefore),
+          nonce: formattedNonce
+        },
+        signature: signature
+      });
+
+      if (!isVerified) {
+        return Response.json({
+          error: 'EIP-3009 cryptographic signature verification failed for BSC USDT.',
+          signer: signerAddress
+        }, { status: 401 });
+      }
+    } catch (verErr) {
+      return Response.json({
+        error: `EIP-3009 signature verification error: ${verErr.message}`,
+        signer: signerAddress
+      }, { status: 401 });
+    }
+  }
+
+  // Record nonce in replay protection set
+  spentNonces.add(nonce);
+  if (spentNonces.size > 10000) {
+    const firstItem = spentNonces.values().next().value;
+    spentNonces.delete(firstItem);
   }
 
   // Verified Payment Signature — Unlock Premium Alpha Feed
