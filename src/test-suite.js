@@ -347,6 +347,73 @@ async function runOfflineUnitTests() {
   assert(unroutableSimData.overallStatus === 'REVERT_BLOCKED', '/api/simulate returns REVERT_BLOCKED when basket includes unroutable asset (USDY)');
   assert(unroutableSimData.legs[0].status === 'SIMULATED_REVERT', '/api/simulate marks untradable leg as SIMULATED_REVERT');
 
+  // 7b. /api/simulate input validation for depositAmount and weights
+  const negDepositSimRes = await simulateHandler(new Request('http://localhost/api/simulate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      allocations: [{ ticker: 'NVDA', weight: 100 }],
+      depositAmount: -10,
+      userWalletAddress: dummyUser
+    })
+  }));
+  assert(negDepositSimRes.status === 400, '/api/simulate rejects negative depositAmount with HTTP 400');
+
+  const zeroDepositSimRes = await simulateHandler(new Request('http://localhost/api/simulate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      allocations: [{ ticker: 'NVDA', weight: 100 }],
+      depositAmount: 0,
+      userWalletAddress: dummyUser
+    })
+  }));
+  assert(zeroDepositSimRes.status === 400, '/api/simulate rejects zero depositAmount with HTTP 400');
+
+  const invalidDepositSimRes = await simulateHandler(new Request('http://localhost/api/simulate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      allocations: [{ ticker: 'NVDA', weight: 100 }],
+      depositAmount: 'not_a_number',
+      userWalletAddress: dummyUser
+    })
+  }));
+  assert(invalidDepositSimRes.status === 400, '/api/simulate rejects non-numeric depositAmount with HTTP 400');
+
+  const negWeightSimRes = await simulateHandler(new Request('http://localhost/api/simulate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      allocations: [{ ticker: 'NVDA', weight: -50 }],
+      depositAmount: 25,
+      userWalletAddress: dummyUser
+    })
+  }));
+  assert(negWeightSimRes.status === 400, '/api/simulate rejects negative allocation weight with HTTP 400');
+
+  const excessSingleWeightSimRes = await simulateHandler(new Request('http://localhost/api/simulate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      allocations: [{ ticker: 'NVDA', weight: 150 }],
+      depositAmount: 25,
+      userWalletAddress: dummyUser
+    })
+  }));
+  assert(excessSingleWeightSimRes.status === 400, '/api/simulate rejects allocation weight > 100% with HTTP 400');
+
+  const excessTotalWeightSimRes = await simulateHandler(new Request('http://localhost/api/simulate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      allocations: [{ ticker: 'NVDA', weight: 60 }, { ticker: 'MSFT', weight: 60 }],
+      depositAmount: 25,
+      userWalletAddress: dummyUser
+    })
+  }));
+  assert(excessTotalWeightSimRes.status === 400, '/api/simulate rejects total allocation weights > 100% with HTTP 400');
+
   // 8. /api/chat with built-in omnibasket-neuro engine
   const chatRes = await chatHandler(new Request('http://localhost/api/chat', {
     method: 'POST',
@@ -485,6 +552,101 @@ async function runOfflineUnitTests() {
   assert(simFaultyBalData.success === false, '/api/simulate fails closed (success: false) when balance lookup fails');
   assert(simFaultyBalData.overallStatus === 'REVERT_BLOCKED', '/api/simulate returns REVERT_BLOCKED on balance read failure');
   assert(simFaultyBalData.legs[0].failReason.includes('Balance lookup failed for USDT'), 'Leg failReason specifies balance lookup failure');
+
+  // 6. Aggregate funding validation: each leg passes individually, but combined requirement fails
+  // Wallet has 30 USDT. Basket has 2 legs requiring $25 each ($50 total).
+  // 25 <= 30 passes per-leg, but 50 > 30 must fail aggregate preflight!
+  const mockCombinedFailClient = {
+    readContract: async ({ functionName, args }) => {
+      if (functionName === 'balanceOf') return 30000000000000000000n; // 30 USDT
+      if (functionName === 'allowance') return 0n;
+      if (functionName === 'getAmountsOut') return [args[0], 42000000000000000n];
+      return 0n;
+    },
+    estimateGas: async () => 45000n,
+    call: async () => ({ data: '0x' })
+  };
+  setCustomPublicBscClient(mockCombinedFailClient);
+
+  const simCombinedFailRes = await simulateHandler(new Request('http://localhost/api/simulate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      allocations: [{ ticker: 'NVDA', weight: 50 }, { ticker: 'MSFT', weight: 50 }],
+      depositAmount: 50,
+      userWalletAddress: dummyUser
+    })
+  }));
+  const simCombinedFailData = await simCombinedFailRes.json();
+  assert(simCombinedFailRes.status === 200, '/api/simulate returns HTTP 200 on aggregate funding check');
+  assert(simCombinedFailData.success === false, '/api/simulate fails closed (success: false) when combined legs exceed wallet balance');
+  assert(simCombinedFailData.overallStatus === 'REVERT_BLOCKED', '/api/simulate returns REVERT_BLOCKED on aggregate funding failure');
+  assert(simCombinedFailData.error.includes('Insufficient USDT balance for basket'), '/api/simulate error message clearly identifies aggregate basket deficit');
+  assert(simCombinedFailData.error.includes('required $50.00'), '/api/simulate error specifies required total ($50.00)');
+  assert(simCombinedFailData.error.includes('available $30.00'), '/api/simulate error specifies available balance ($30.00)');
+  assert(simCombinedFailData.legs.length === 2, 'Legs array returned for failed aggregate basket');
+  assert(simCombinedFailData.legs[0].simulationStatus === 'SIMULATED_REVERT', 'Leg 1 marked SIMULATED_REVERT on aggregate deficit');
+  assert(simCombinedFailData.legs[1].simulationStatus === 'SIMULATED_REVERT', 'Leg 2 marked SIMULATED_REVERT on aggregate deficit');
+
+  // 7. Exact-balance basket: total required matches wallet balance exactly ($50 required, $50 available) -> succeeds
+  const mockExactBalanceClient = {
+    readContract: async ({ functionName, args }) => {
+      if (functionName === 'balanceOf') return 50000000000000000000n; // Exactly 50 USDT
+      if (functionName === 'allowance') return 0n;
+      if (functionName === 'getAmountsOut') return [args[0], 42000000000000000n];
+      return 0n;
+    },
+    estimateGas: async () => 45000n,
+    call: async () => ({ data: '0x' })
+  };
+  setCustomPublicBscClient(mockExactBalanceClient);
+
+  const simExactBalRes = await simulateHandler(new Request('http://localhost/api/simulate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      allocations: [{ ticker: 'NVDA', weight: 50 }, { ticker: 'MSFT', weight: 50 }],
+      depositAmount: 50,
+      userWalletAddress: dummyUser
+    })
+  }));
+  const simExactBalData = await simExactBalRes.json();
+  assert(simExactBalData.success === true, '/api/simulate succeeds when wallet balance matches aggregate total exactly');
+  assert(simExactBalData.overallStatus === 'APPROVAL_REQUIRED_FIRST', 'Exact balance basket correctly requests approval when allowance is zero');
+  assert(simExactBalData.legs[0].simulationStatus === 'APPROVAL_REQUIRED_FIRST', 'Leg 1 approval verified on exact balance');
+  assert(simExactBalData.legs[1].simulationStatus === 'APPROVAL_REQUIRED_FIRST', 'Leg 2 approval verified on exact balance');
+
+  // 8. Skipped legs below $5 floor do not inflate required balance
+  // Basket: NVDA 90% ($22.50), MSFT 10% ($2.50 < $5 floor, skipped). Wallet has 23 USDT.
+  // If MSFT $2.50 was counted, 25 USDT would exceed 23 USDT balance and fail.
+  const mockSkippedLegClient = {
+    readContract: async ({ functionName, args }) => {
+      if (functionName === 'balanceOf') return 23000000000000000000n; // 23 USDT
+      if (functionName === 'allowance') return 0n;
+      if (functionName === 'getAmountsOut') return [args[0], 42000000000000000n];
+      return 0n;
+    },
+    estimateGas: async () => 45000n,
+    call: async () => ({ data: '0x' })
+  };
+  setCustomPublicBscClient(mockSkippedLegClient);
+
+  const simSkippedLegRes = await simulateHandler(new Request('http://localhost/api/simulate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      allocations: [{ ticker: 'NVDA', weight: 90 }, { ticker: 'MSFT', weight: 10 }],
+      depositAmount: 25,
+      userWalletAddress: dummyUser
+    })
+  }));
+  const simSkippedLegData = await simSkippedLegRes.json();
+  assert(simSkippedLegData.success === true, '/api/simulate succeeds when wallet covers only executable legs');
+  const msftLeg = simSkippedLegData.legs.find(l => l.ticker === 'MSFT');
+  assert(msftLeg && msftLeg.status === 'SKIPPED_BELOW_MIN_FLOOR', 'Leg below $5 floor is marked SKIPPED_BELOW_MIN_FLOOR');
+  assert(msftLeg && msftLeg.simulationStatus === 'SKIPPED', 'Skipped leg simulationStatus is SKIPPED');
+  const nvdaLeg = simSkippedLegData.legs.find(l => l.ticker === 'NVDA');
+  assert(nvdaLeg && nvdaLeg.simulationStatus === 'APPROVAL_REQUIRED_FIRST', 'Executable leg is simulated successfully');
 
   // Reset custom client
   setCustomPublicBscClient(null);
@@ -799,6 +961,192 @@ async function runOfflineUnitTests() {
       userWalletAddress: dummyUser
     });
     assert(emptyAllocResult.success === false, 'executeBasket rejects empty allocations array');
+  }
+
+  // Test 8.8: Combined requirement exceeds wallet balance in executeBasket
+  // Assert preflight fails, transactions are blocked, and zero transactions are dispatched
+  {
+    const sentTransactions = [];
+    let promptCount = 0;
+    const mockProvider = {
+      request: async ({ method, params }) => {
+        if (method === 'eth_sendTransaction') {
+          sentTransactions.push(params[0]);
+          return '0xtx';
+        }
+        return null;
+      }
+    };
+
+    const result = await executeBasket({
+      allocations: [{ ticker: 'NVDA', weight: 50 }, { ticker: 'MSFT', weight: 50 }],
+      depositAmount: 50,
+      userWalletAddress: dummyUser,
+      provider: mockProvider,
+      confirmDialog: async () => { promptCount++; return true; },
+      simulateApiFn: async () => ({
+        ok: true,
+        status: 200,
+        data: {
+          success: false,
+          overallStatus: 'REVERT_BLOCKED',
+          error: 'Insufficient USDT balance for basket: required $50.00, available $30.00. Preflight blocked to prevent partial basket execution.',
+          legs: [
+            { ticker: 'NVDA', simulationStatus: 'SIMULATED_REVERT', failReason: 'Insufficient USDT balance for NVDA: required $25.00, available $30.00 (basket total: $50.00).' },
+            { ticker: 'MSFT', simulationStatus: 'SIMULATED_REVERT', failReason: 'Insufficient USDT balance for MSFT: required $25.00, available $30.00 (basket total: $50.00).' }
+          ]
+        }
+      })
+    });
+
+    assert(result.success === false, 'executeBasket fails closed on aggregate funding deficit');
+    assert(result.blockedAt === 'PREFLIGHT', 'Blocked at PREFLIGHT boundary');
+    assert(promptCount === 0, 'ZERO user confirmation prompts triggered on aggregate deficit');
+    assert(sentTransactions.length === 0, 'ZERO transactions dispatched to provider when combined balance is insufficient');
+  }
+
+  // Test 8.9: Exact-balance basket execution succeeds through approval and swap
+  {
+    const sentTransactions = [];
+    let promptCount = 0;
+    const mockProvider = {
+      request: async ({ method, params }) => {
+        if (method === 'eth_sendTransaction') {
+          sentTransactions.push(params[0]);
+          return `0xtxHash_${sentTransactions.length}`;
+        }
+        return null;
+      }
+    };
+
+    let buildCallCount = 0;
+    const result = await executeBasket({
+      allocations: [{ ticker: 'NVDA', weight: 50 }, { ticker: 'MSFT', weight: 50 }],
+      depositAmount: 50,
+      userWalletAddress: dummyUser,
+      provider: mockProvider,
+      confirmDialog: async () => { promptCount++; return true; },
+      pollReceiptFn: async () => ({ status: 'CONFIRMED' }),
+      simulateApiFn: async () => ({
+        ok: true,
+        status: 200,
+        data: {
+          success: true,
+          overallStatus: 'APPROVAL_REQUIRED_FIRST',
+          legs: [
+            { ticker: 'NVDA', simulationStatus: 'APPROVAL_REQUIRED_FIRST', needsApproval: true },
+            { ticker: 'MSFT', simulationStatus: 'APPROVAL_REQUIRED_FIRST', needsApproval: true }
+          ]
+        }
+      }),
+      buildSwapApiFn: async ({ toTicker }) => {
+        buildCallCount++;
+        // Odd calls are pre-approval (needsApproval: true), even calls are post-approval (needsApproval: false)
+        const isFreshAfterApprove = buildCallCount % 2 === 0;
+        return {
+          ok: true,
+          status: 200,
+          data: {
+            success: true,
+            needsApproval: !isFreshAfterApprove,
+            approveTx: { to: usdtAddr, spender: BSC_PANCAKE_ROUTER, data: '0x095ea7b3' + toTicker },
+            swapTx: { to: BSC_PANCAKE_ROUTER, data: '0x38ed1739' + toTicker, value: '0x0' },
+            simulation: { status: 'SUCCESS' },
+            quote: { expectedAmountOut: '0.1', amountOutMin: '0.099', slippagePercent: '0.5', quoteSource: 'PancakeSwap V2' }
+          }
+        };
+      }
+    });
+
+    assert(result.success === true, 'executeBasket succeeds for exact-balance basket');
+    assert(sentTransactions.length === 4, 'Broadcast exactly 4 transactions (2 approvals + 2 swaps)');
+    assert(sentTransactions[0].data.startsWith('0x095ea7b3'), 'Leg 1 Tx 1 is approval');
+    assert(sentTransactions[1].data.startsWith('0x38ed1739'), 'Leg 1 Tx 2 is swap');
+    assert(sentTransactions[2].data.startsWith('0x095ea7b3'), 'Leg 2 Tx 1 is approval');
+    assert(sentTransactions[3].data.startsWith('0x38ed1739'), 'Leg 2 Tx 2 is swap');
+  }
+
+  // Test 8.10: Skipped leg below $5 floor in executeBasket
+  {
+    const sentTransactions = [];
+    const mockProvider = {
+      request: async ({ method, params }) => {
+        if (method === 'eth_sendTransaction') {
+          sentTransactions.push(params[0]);
+          return `0xtxHash_${sentTransactions.length}`;
+        }
+        return null;
+      }
+    };
+
+    let buildCount = 0;
+    const result = await executeBasket({
+      allocations: [{ ticker: 'NVDA', weight: 90 }, { ticker: 'MSFT', weight: 10 }],
+      depositAmount: 25,
+      userWalletAddress: dummyUser,
+      provider: mockProvider,
+      confirmDialog: async () => true,
+      pollReceiptFn: async () => ({ status: 'CONFIRMED' }),
+      simulateApiFn: async () => ({
+        ok: true,
+        status: 200,
+        data: {
+          success: true,
+          overallStatus: 'APPROVAL_REQUIRED_FIRST',
+          legs: [
+            { ticker: 'NVDA', simulationStatus: 'APPROVAL_REQUIRED_FIRST', needsApproval: true },
+            { ticker: 'MSFT', simulationStatus: 'SKIPPED', status: 'SKIPPED_BELOW_MIN_FLOOR' }
+          ]
+        }
+      }),
+      buildSwapApiFn: async () => {
+        buildCount++;
+        return {
+          ok: true,
+          status: 200,
+          data: {
+            success: true,
+            needsApproval: buildCount === 1,
+            approveTx: { to: usdtAddr, spender: BSC_PANCAKE_ROUTER, data: '0x095ea7b3' },
+            swapTx: { to: BSC_PANCAKE_ROUTER, data: '0x38ed1739', value: '0x0' },
+            simulation: { status: 'SUCCESS' },
+            quote: { expectedAmountOut: '0.1', amountOutMin: '0.099', slippagePercent: '0.5' }
+          }
+        };
+      }
+    });
+
+    assert(result.success === true, 'executeBasket succeeds when below-floor leg is skipped');
+    const skippedLeg = result.results.find(r => r.ticker === 'MSFT');
+    assert(skippedLeg && skippedLeg.status.includes('SKIPPED'), 'MSFT leg recorded as SKIPPED');
+    assert(sentTransactions.length === 2, 'Only executable leg (NVDA) broadcast transactions (approve + swap)');
+  }
+
+  // Test 8.11: Invalid deposit or allocation values rejected in executeBasket at validation
+  {
+    const negDepResult = await executeBasket({
+      allocations: [{ ticker: 'NVDA', weight: 100 }],
+      depositAmount: -10,
+      userWalletAddress: dummyUser
+    });
+    assert(negDepResult.success === false, 'executeBasket rejects negative depositAmount');
+    assert(negDepResult.blockedAt === 'VALIDATION', 'Blocked at VALIDATION boundary for negative deposit');
+
+    const negWeightResult = await executeBasket({
+      allocations: [{ ticker: 'NVDA', weight: -50 }],
+      depositAmount: 25,
+      userWalletAddress: dummyUser
+    });
+    assert(negWeightResult.success === false, 'executeBasket rejects negative allocation weight');
+    assert(negWeightResult.blockedAt === 'VALIDATION', 'Blocked at VALIDATION boundary for negative weight');
+
+    const excessWeightResult = await executeBasket({
+      allocations: [{ ticker: 'NVDA', weight: 80 }, { ticker: 'MSFT', weight: 80 }],
+      depositAmount: 25,
+      userWalletAddress: dummyUser
+    });
+    assert(excessWeightResult.success === false, 'executeBasket rejects excessive total weights (> 100%)');
+    assert(excessWeightResult.blockedAt === 'VALIDATION', 'Blocked at VALIDATION boundary for excessive weight');
   }
 }
 

@@ -54,6 +54,46 @@ export async function executeBasket({
     };
   }
 
+  for (const alloc of allocations) {
+    if (!alloc || typeof alloc !== 'object' || typeof alloc.ticker !== 'string' || !alloc.ticker.trim()) {
+      return {
+        success: false,
+        summary: 'Invalid allocation ticker in basket.',
+        blockedAt: 'VALIDATION',
+        results: []
+      };
+    }
+    const w = Number(alloc.weight);
+    if (typeof alloc.weight === 'boolean' || !Number.isFinite(w) || w < 0 || w > 100) {
+      return {
+        success: false,
+        summary: `Invalid allocation weight for ${alloc.ticker}: ${alloc.weight}`,
+        blockedAt: 'VALIDATION',
+        results: []
+      };
+    }
+  }
+
+  const totalWeight = allocations.reduce((sum, a) => sum + Number(a.weight), 0);
+  if (totalWeight <= 0 || totalWeight > 100.01) {
+    return {
+      success: false,
+      summary: `Total allocation weights must sum to at most 100% (received ${totalWeight.toFixed(2)}%).`,
+      blockedAt: 'VALIDATION',
+      results: []
+    };
+  }
+
+  const depositNum = Number(depositAmount);
+  if (depositAmount === undefined || typeof depositAmount === 'boolean' || !Number.isFinite(depositNum) || depositNum <= 0) {
+    return {
+      success: false,
+      summary: 'depositAmount must be a finite positive number.',
+      blockedAt: 'VALIDATION',
+      results: []
+    };
+  }
+
   if (!userWalletAddress) {
     return {
       success: false,
@@ -105,11 +145,11 @@ export async function executeBasket({
     userWalletAddress
   });
 
-  if (!simResponse.ok || !simResponse.data.success || simResponse.data.overallStatus === 'REVERT_BLOCKED') {
-    const revertLeg = simResponse.data.legs?.find(l => l.simulationStatus === 'SIMULATED_REVERT');
-    const failMsg = revertLeg 
-      ? `Simulation reverted on leg ${revertLeg.ticker}: ${revertLeg.failReason || 'Revert'}`
-      : (simResponse.data.error || 'Pre-transaction simulation guardrail blocked execution.');
+  if (!simResponse.ok || !simResponse.data?.success || simResponse.data?.overallStatus === 'REVERT_BLOCKED') {
+    const errorMsg = simResponse.data?.error || simResponse.data?.failReason;
+    const revertLeg = simResponse.data?.legs?.find(l => l.simulationStatus === 'SIMULATED_REVERT');
+    const failMsg = errorMsg 
+      || (revertLeg ? `Simulation reverted on leg ${revertLeg.ticker}: ${revertLeg.failReason || 'Revert'}` : 'Pre-transaction simulation guardrail blocked execution.');
 
     return {
       success: false,

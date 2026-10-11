@@ -16,12 +16,15 @@ import {
 export async function POST(req) {
   try {
     const body = await req.json().catch(() => ({}));
-    const { allocations, depositAmount = 25, userWalletAddress } = body;
+    const { allocations, userWalletAddress } = body;
+    const rawDeposit = body.depositAmount !== undefined ? body.depositAmount : 25;
 
+    // 1. Validate allocations array
     if (!allocations || !Array.isArray(allocations) || allocations.length === 0) {
       return Response.json({ success: false, error: 'Valid allocations array is required.' }, { status: 400 });
     }
 
+    // 2. Validate userWalletAddress
     if (!userWalletAddress || !isAddress(userWalletAddress)) {
       return Response.json({ 
         success: false, 
@@ -29,9 +32,162 @@ export async function POST(req) {
       }, { status: 400 });
     }
 
-    const effectiveAddress = userWalletAddress;
+    // 3. Validate depositAmount
+    const depositAmount = Number(rawDeposit);
+    if (typeof rawDeposit === 'boolean' || !Number.isFinite(depositAmount) || depositAmount <= 0) {
+      return Response.json({ 
+        success: false, 
+        error: 'depositAmount must be a finite positive number.' 
+      }, { status: 400 });
+    }
 
+    // 4. Validate individual allocations and total weights
+    let totalWeight = 0;
+    for (const alloc of allocations) {
+      if (!alloc || typeof alloc !== 'object') {
+        return Response.json({ success: false, error: 'Each allocation must be an object with ticker and weight.' }, { status: 400 });
+      }
+      if (typeof alloc.ticker !== 'string' || !alloc.ticker.trim()) {
+        return Response.json({ success: false, error: 'Each allocation must specify a valid ticker symbol.' }, { status: 400 });
+      }
+      const weight = Number(alloc.weight);
+      if (typeof alloc.weight === 'boolean' || !Number.isFinite(weight)) {
+        return Response.json({ success: false, error: `Allocation weight for ${alloc.ticker} must be a valid number.` }, { status: 400 });
+      }
+      if (weight < 0) {
+        return Response.json({ success: false, error: `Allocation weight for ${alloc.ticker} cannot be negative (${weight}%).` }, { status: 400 });
+      }
+      if (weight > 100) {
+        return Response.json({ success: false, error: `Allocation weight for ${alloc.ticker} cannot exceed 100% (${weight}%).` }, { status: 400 });
+      }
+      totalWeight += weight;
+    }
+
+    if (totalWeight <= 0 || totalWeight > 100.01) {
+      return Response.json({ 
+        success: false, 
+        error: `Total allocation weights must sum to at most 100% (received ${totalWeight.toFixed(2)}%).` 
+      }, { status: 400 });
+    }
+
+    const effectiveAddress = userWalletAddress;
     const fromToken = BSC_RWA_TOKENS.USDT.contractAddress;
+
+    // 5. Aggregate USDT requirement calculation (Integer BigInt units)
+    // Only executable legs ($5.00 min order floor) require USDT funding.
+    let totalRequiredWei = 0n;
+    for (const alloc of allocations) {
+      const targetUsd = (depositAmount * alloc.weight) / 100;
+      if (targetUsd >= 5) {
+        const legAmountWei = BigInt(Math.floor(targetUsd * 1e18));
+        totalRequiredWei += legAmountWei;
+      }
+    }
+
+    // 6. Read on-chain USDT balance upfront ONCE
+    let currentBalance = 0n;
+    try {
+      currentBalance = await checkTokenBalance({
+        tokenAddress: fromToken,
+        ownerAddress: effectiveAddress
+      });
+    } catch (balanceErr) {
+      const failReason = `Balance lookup failed for USDT: ${balanceErr.message || 'RPC read failure'}. Preflight blocked.`;
+      const failedLegs = allocations.map(alloc => {
+        const targetToken = BSC_RWA_TOKENS[alloc.ticker];
+        const targetUsd = (depositAmount * alloc.weight) / 100;
+        if (targetUsd < 5) {
+          return {
+            ticker: alloc.ticker,
+            name: targetToken?.name || alloc.ticker,
+            weight: alloc.weight,
+            targetUsd,
+            status: 'SKIPPED_BELOW_MIN_FLOOR',
+            simulationStatus: 'SKIPPED',
+            error: 'Below $5.00 minimum order floor.'
+          };
+        }
+        return {
+          ticker: alloc.ticker,
+          symbol: targetToken?.symbol || alloc.ticker,
+          name: targetToken?.name || alloc.ticker,
+          contractAddress: targetToken?.contractAddress,
+          weight: alloc.weight,
+          targetUsd,
+          status: 'SIMULATED_REVERT',
+          simulationStatus: 'SIMULATED_REVERT',
+          failReason
+        };
+      });
+
+      return Response.json({
+        success: false,
+        overallStatus: 'REVERT_BLOCKED',
+        network: 'BNB Smart Chain (BSC)',
+        chainId: 56,
+        depositUsd: depositAmount,
+        userWalletAddress,
+        totalLegs: failedLegs.length,
+        legs: failedLegs,
+        simulationPassed: false,
+        error: failReason,
+        failReason,
+        verificationNote: 'Balance lookup failed on BSC state. Order broadcast blocked.'
+      });
+    }
+
+    // 7. Check aggregate funding against on-chain USDT balance
+    if (totalRequiredWei > currentBalance) {
+      const totalRequiredUsd = (Number(totalRequiredWei) / 1e18).toFixed(2);
+      const availableUsdt = (Number(currentBalance) / 1e18).toFixed(2);
+      const failMsg = `Insufficient USDT balance for basket: required $${totalRequiredUsd}, available $${availableUsdt}. Preflight blocked to prevent partial basket execution.`;
+
+      const failedLegs = allocations.map(alloc => {
+        const targetToken = BSC_RWA_TOKENS[alloc.ticker];
+        const targetUsd = (depositAmount * alloc.weight) / 100;
+        if (targetUsd < 5) {
+          return {
+            ticker: alloc.ticker,
+            name: targetToken?.name || alloc.ticker,
+            weight: alloc.weight,
+            targetUsd,
+            status: 'SKIPPED_BELOW_MIN_FLOOR',
+            simulationStatus: 'SKIPPED',
+            error: 'Below $5.00 minimum order floor.'
+          };
+        }
+        return {
+          ticker: alloc.ticker,
+          symbol: targetToken?.symbol || alloc.ticker,
+          name: targetToken?.name || alloc.ticker,
+          contractAddress: targetToken?.contractAddress,
+          weight: alloc.weight,
+          targetUsd,
+          status: 'SIMULATED_REVERT',
+          simulationStatus: 'SIMULATED_REVERT',
+          failReason: `Insufficient USDT balance for ${alloc.ticker}: required $${targetUsd.toFixed(2)}, available $${availableUsdt} (basket total: $${totalRequiredUsd}). Preflight blocked to prevent execution failure.`
+        };
+      });
+
+      return Response.json({
+        success: false,
+        overallStatus: 'REVERT_BLOCKED',
+        network: 'BNB Smart Chain (BSC)',
+        chainId: 56,
+        depositUsd: depositAmount,
+        userWalletAddress,
+        totalLegs: failedLegs.length,
+        legs: failedLegs,
+        totalRequiredUsdt: totalRequiredUsd,
+        availableUsdt,
+        simulationPassed: false,
+        error: failMsg,
+        failReason: failMsg,
+        verificationNote: 'Pre-transaction simulation detected insufficient USDT balance for aggregate basket on BSC state. Order broadcast blocked.'
+      });
+    }
+
+    // 8. Individual Leg Simulation Loop (Routes, Quotes, Allowances, Exact Calldata Simulation)
     const legResults = [];
     let totalGasGwei = 0;
 
@@ -100,45 +256,7 @@ export async function POST(req) {
 
       const toAmountTokens = Number(quote.expectedAmountOutWei) / 1e18;
 
-      // 1. Check on-chain USDT balance on BSC
-      let currentBalance = 0n;
-      try {
-        currentBalance = await checkTokenBalance({
-          tokenAddress: fromToken,
-          ownerAddress: effectiveAddress
-        });
-      } catch (balanceErr) {
-        legResults.push({
-          ticker: alloc.ticker,
-          symbol: targetToken.symbol,
-          name: targetToken.name,
-          contractAddress: targetToken.contractAddress,
-          weight: alloc.weight,
-          targetUsd,
-          status: 'SIMULATED_REVERT',
-          simulationStatus: 'SIMULATED_REVERT',
-          failReason: `Balance lookup failed for USDT: ${balanceErr.message || 'RPC read failure'}. Preflight blocked.`
-        });
-        continue;
-      }
-
-      if (currentBalance < amountWei) {
-        const availableUsdt = (Number(currentBalance) / 1e18).toFixed(2);
-        legResults.push({
-          ticker: alloc.ticker,
-          symbol: targetToken.symbol,
-          name: targetToken.name,
-          contractAddress: targetToken.contractAddress,
-          weight: alloc.weight,
-          targetUsd,
-          status: 'SIMULATED_REVERT',
-          simulationStatus: 'SIMULATED_REVERT',
-          failReason: `Insufficient USDT balance for ${alloc.ticker}: required $${targetUsd.toFixed(2)}, available $${availableUsdt}. Preflight blocked to prevent execution failure.`
-        });
-        continue;
-      }
-
-      // 2. Check on-chain allowance on BSC
+      // Check on-chain allowance on BSC
       let currentAllowance = 0n;
       try {
         currentAllowance = await checkTokenAllowance({
