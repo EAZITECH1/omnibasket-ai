@@ -52,7 +52,7 @@ All integrated endpoints strictly follow the official BNB Chain Hackathon specif
 * **Secondary Flow: Binance Agentic Wallet (Keyless MPC with Guardrails)**:
   - Supports per-user QR code pairing with the mobile Binance App.
   - Enforces session isolation via `HttpOnly` cookie-only credentials with automatic session rotation upon verified pairing.
-  - **Production Persistence Requirements**: Multi-instance and containerized deployments (such as Railway) require an attached persistent volume mounted at `BAW_SESSION_STORE_DIR` and a 32+ character `BAW_SESSION_SECRET`. If unconfigured, the app honestly fails closed and reports `AGENTIC UNAVAILABLE`.
+  - **Production Persistence Requirements**: Multi-instance and containerized deployments (such as Railway) require a durable shared session store plus a 32+ character `BAW_SESSION_SECRET`. Preferred: Redis via `BAW_SESSION_REDIS_URL` (or Railway's Redis plugin, which injects `REDIS_URL`); alternatively a persistent volume at `BAW_SESSION_STORE_DIR`. Redis takes precedence when both are set. Sessions stay AES-256-GCM encrypted with TTL expiry on either backend. If unconfigured, the app honestly fails closed and reports `AGENTIC UNAVAILABLE`. Trading still goes through the Extension Wallet.
   - **Truthful Execution Capability**: Server-side autonomous trade submission without browser signing is marked `AUTONOMOUS_TRADING_UNAVAILABLE` (HTTP 503), directing users to Extension Wallet mode for verified on-chain execution.
 
 ### 3. 🛡️ Meaningful Minimum Output & 0.5% Hard Slippage Protection

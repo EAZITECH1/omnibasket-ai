@@ -1182,7 +1182,11 @@ async function runOfflineUnitTests() {
     deleteSession, 
     clearAllSessions,
     validateStoreConfig,
-    getMasterEncryptionKey
+    getMasterEncryptionKey,
+    rotateSession,
+    createRedisBackend,
+    setSessionBackendForTesting,
+    closeSessionStore
   } = await import('./services/bawSessionStore.js');
 
   await clearAllSessions();
@@ -1581,10 +1585,14 @@ async function runOfflineUnitTests() {
     const prevEnv = process.env.NODE_ENV;
     const prevDir = process.env.BAW_SESSION_STORE_DIR;
     const prevSecret = process.env.BAW_SESSION_SECRET;
+    const prevRedis1 = process.env.BAW_SESSION_REDIS_URL;
+    const prevRedis2 = process.env.REDIS_URL;
     try {
       process.env.NODE_ENV = 'production';
       delete process.env.BAW_SESSION_STORE_DIR;
       delete process.env.BAW_SESSION_SECRET;
+      delete process.env.BAW_SESSION_REDIS_URL;
+      delete process.env.REDIS_URL;
 
       // Status endpoint reports UNAVAILABLE
       const unavailStatusRes = await agenticStatusHandler(new Request('http://localhost/api/agentic-wallet/status'));
@@ -1619,6 +1627,8 @@ async function runOfflineUnitTests() {
       process.env.NODE_ENV = prevEnv;
       if (prevDir !== undefined) process.env.BAW_SESSION_STORE_DIR = prevDir;
       if (prevSecret !== undefined) process.env.BAW_SESSION_SECRET = prevSecret;
+      if (prevRedis1 !== undefined) process.env.BAW_SESSION_REDIS_URL = prevRedis1;
+      if (prevRedis2 !== undefined) process.env.REDIS_URL = prevRedis2;
     }
 
     // 10.3: Multi-Instance Session Persistence across Restarts
@@ -1718,6 +1728,147 @@ async function runOfflineUnitTests() {
       try {
         fs.rmSync(testStoreDir, { recursive: true, force: true });
       } catch (_) {}
+    }
+  }
+  // ----------------------------------------------------------------------
+  // Test Group 11: Redis session backend
+  // ----------------------------------------------------------------------
+  console.log('\nTest Group 11: Redis Session Backend (same interface, AES-256-GCM, TTL)');
+  {
+    // Minimal in-memory Redis double: get / set(k,v,'PX',ms) / del / scan with real PX expiry
+    const makeFakeRedis = () => {
+      const data = new Map();
+      const alive = (k) => {
+        const e = data.get(k);
+        if (!e) return false;
+        if (e.exp !== null && Date.now() >= e.exp) { data.delete(k); return false; }
+        return true;
+      };
+      return {
+        data,
+        async get(k) { return alive(k) ? data.get(k).v : null; },
+        async set(k, v, mode, ms) { data.set(k, { v, exp: mode === 'PX' ? Date.now() + ms : null }); return 'OK'; },
+        async del(...ks) { let n = 0; for (const k of ks) if (data.delete(k)) n++; return n; },
+        async scan(cursor, _m, pattern) {
+          const prefix = pattern.replace(/\*$/, '');
+          return ['0', [...data.keys()].filter((k) => k.startsWith(prefix) && alive(k))];
+        }
+      };
+    };
+
+    // 11.1 Config selection
+    const secretOk = 'a_very_secure_high_entropy_secret_1234567890!';
+    const rCfg = validateStoreConfig({ NODE_ENV: 'production', BAW_SESSION_REDIS_URL: 'redis://localhost:6379', BAW_SESSION_SECRET: secretOk });
+    assert(rCfg.valid === true && rCfg.backend === 'redis', 'Production accepts BAW_SESSION_REDIS_URL and selects redis backend');
+    const rCfg2 = validateStoreConfig({ NODE_ENV: 'production', REDIS_URL: 'rediss://default:pw@host:6380', BAW_SESSION_SECRET: secretOk });
+    assert(rCfg2.valid === true && rCfg2.backend === 'redis', 'Production accepts Railway-injected REDIS_URL');
+    const rCfg3 = validateStoreConfig({ NODE_ENV: 'production', BAW_SESSION_REDIS_URL: 'http://not-redis', BAW_SESSION_SECRET: secretOk });
+    assert(rCfg3.valid === false && rCfg3.reason === 'REDIS_URL_INVALID', 'Invalid Redis URL scheme rejected');
+    const rCfg4 = validateStoreConfig({ NODE_ENV: 'production', BAW_SESSION_REDIS_URL: 'redis://localhost:6379' });
+    assert(rCfg4.valid === false && rCfg4.reason === 'SESSION_SECRET_INVALID', 'Redis backend still requires BAW_SESSION_SECRET');
+    const rCfg5 = validateStoreConfig({ NODE_ENV: 'production', BAW_SESSION_REDIS_URL: 'redis://localhost:6379', BAW_SESSION_STORE_DIR: '/data/x', BAW_SESSION_SECRET: secretOk });
+    assert(rCfg5.backend === 'redis', 'Redis takes precedence over BAW_SESSION_STORE_DIR');
+
+    const secret = 'redis_backend_test_secret_minimum_32_bytes_long_xyz789';
+    const mkSession = (extra = {}) => ({
+      status: 'CONNECTED',
+      walletAddress: '0xAbCdEf0123456789AbCdEf0123456789AbCdEf01',
+      expiresAt: Date.now() + 3600000,
+      ...extra
+    });
+
+    try {
+      const fake = makeFakeRedis();
+      setSessionBackendForTesting(createRedisBackend(fake));
+
+      // 11.2 Roundtrip + ciphertext at rest
+      const sid = crypto.randomUUID();
+      assert(await saveSession(sid, mkSession(), null, secret) === true, 'Redis: saveSession succeeds');
+      const stored = [...fake.data.values()][0].v;
+      assert(!stored.includes('AbCdEf0123456789'), 'Redis: wallet address is not stored in plaintext');
+      assert(![...fake.data.keys()][0].includes(sid), 'Redis: key does not contain raw session ID');
+      const loaded = await loadSession(sid, null, secret);
+      assert(loaded && loaded.walletAddress === mkSession().walletAddress, 'Redis: loadSession decrypts roundtrip');
+
+      // 11.3 Wrong key
+      assert(await loadSession(sid, null, 'a_completely_different_secret_that_is_long_enough_1') === null, 'Redis: wrong key returns null');
+      assert(fake.data.size === 1, 'Redis: wrong key does not destroy a valid payload');
+
+      // 11.4 Tampered data
+      const key0 = [...fake.data.keys()][0];
+      const obj = JSON.parse(fake.data.get(key0).v);
+      obj.data = (obj.data[0] === '0' ? '1' : '0') + obj.data.slice(1);
+      fake.data.get(key0).v = JSON.stringify(obj);
+      assert(await loadSession(sid, null, secret) === null, 'Redis: tampered ciphertext rejected');
+      fake.data.get(key0).v = '{not json';
+      assert(await loadSession(sid, null, secret) === null, 'Redis: corrupt payload rejected');
+      assert(fake.data.size === 0, 'Redis: corrupt payload removed');
+
+      // 11.5 Expiry (native TTL + app-level check)
+      const sidExp = crypto.randomUUID();
+      await saveSession(sidExp, mkSession({ expiresAt: Date.now() + 1200 }), null, secret);
+      assert(await loadSession(sidExp, null, secret) !== null, 'Redis: session readable before expiry');
+      await new Promise((r) => setTimeout(r, 1300));
+      assert(await loadSession(sidExp, null, secret) === null, 'Redis: expired session returns null');
+      assert(fake.data.size === 0, 'Redis: expired session evicted');
+
+      const sidApp = crypto.randomUUID();
+      await saveSession(sidApp, mkSession({ expiresAt: Date.now() - 1000 }), null, secret);
+      assert(await loadSession(sidApp, null, secret) === null, 'Redis: app-level expiresAt enforced');
+
+      // 11.6 Concurrent writes
+      const sidC = crypto.randomUUID();
+      const results = await Promise.all(Array.from({ length: 10 }, (_, i) => saveSession(sidC, mkSession({ n: i }), null, secret)));
+      assert(results.every((r) => r === true), 'Redis: 10 concurrent writes all succeed');
+      const cLoaded = await loadSession(sidC, null, secret);
+      assert(cLoaded && Number.isInteger(cLoaded.n), 'Redis: concurrent writes leave one valid session');
+
+      // 11.7 Rotate + delete
+      const rot = await rotateSession(sidC, null, secret);
+      assert(rot && rot.newSessionId !== sidC, 'Redis: rotateSession issues new ID');
+      assert(await loadSession(sidC, null, secret) === null, 'Redis: old session ID invalid after rotation');
+      assert(await loadSession(rot.newSessionId, null, secret) !== null, 'Redis: new session ID valid after rotation');
+      await deleteSession(rot.newSessionId);
+      assert(await loadSession(rot.newSessionId, null, secret) === null, 'Redis: deleteSession removes session');
+
+      // 11.8 Restart survival: new backend instance, same shared Redis + secret
+      const sidR = crypto.randomUUID();
+      await saveSession(sidR, mkSession(), null, secret);
+      setSessionBackendForTesting(null);
+      setSessionBackendForTesting(createRedisBackend(fake));
+      const survived = await loadSession(sidR, null, secret);
+      assert(survived && survived.status === 'CONNECTED', 'Redis: session survives app restart (new instance, same Redis)');
+
+      // 11.9 Unavailable store fails closed (save returns false)
+      const down = { name: 'redis', get: async () => { throw new Error('down'); }, set: async () => { throw new Error('down'); }, del: async () => {}, clear: async () => {} };
+      setSessionBackendForTesting(down);
+      assert(await saveSession(crypto.randomUUID(), mkSession(), null, secret) === false, 'Redis down: saveSession returns false');
+      assert(await loadSession(sidR, null, secret) === null, 'Redis down: loadSession returns null');
+
+      // 11.10 Optional real Redis integration
+      if (process.env.BAW_TEST_REDIS_URL) {
+        const { default: Redis } = await import('ioredis');
+        const client = new Redis(process.env.BAW_TEST_REDIS_URL);
+        try {
+          setSessionBackendForTesting(createRedisBackend(client));
+          const s = crypto.randomUUID();
+          await saveSession(s, mkSession(), null, secret);
+          assert(await loadSession(s, null, secret) !== null, 'Real Redis: roundtrip');
+          assert(await loadSession(s, null, 'wrong_secret_wrong_secret_wrong_secret_12') === null, 'Real Redis: wrong key rejected');
+          const sx = crypto.randomUUID();
+          await saveSession(sx, mkSession({ expiresAt: Date.now() + 1500 }), null, secret);
+          await new Promise((r) => setTimeout(r, 2600));
+          assert(await loadSession(sx, null, secret) === null, 'Real Redis: native PX TTL expires session');
+          await deleteSession(s);
+        } finally {
+          await client.quit();
+        }
+      } else {
+        console.log('  ⏭  Real Redis integration skipped (set BAW_TEST_REDIS_URL to run)');
+      }
+    } finally {
+      setSessionBackendForTesting(null);
+      await closeSessionStore();
     }
   }
 }

@@ -350,7 +350,15 @@ export async function authSignin(req) {
   session.expiresAt = pairingData.expireAt + 3600000; // session TTL
 
   // Persist to durable encrypted store
-  await saveSession(sessionId, session);
+  const saved = await saveSession(sessionId, session);
+  if (saved === false) {
+    return {
+      success: false,
+      status: 503,
+      error: 'STORE_UNAVAILABLE',
+      message: 'Session store is unavailable. Pairing cannot be started.'
+    };
+  }
 
   // Return success with cookie info; DO NOT expose sessionId in JSON body
   return {
