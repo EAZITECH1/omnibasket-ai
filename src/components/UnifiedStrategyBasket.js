@@ -4,6 +4,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import Navbar from './Navbar';
 import FormattedMessageContent from './FormattedMessageContent';
 import { useWallet } from '../context/WalletContext.js';
+import { getInjectedProvider, pollExtensionReceipt } from '../lib/wallet/provider.js';
 import { BSC_RWA_TOKENS, PRESET_BASKETS } from '../services/tokens';
 import { generateAllocationPlan } from '../services/rebalancer';
 import { getMarketHoursStatus } from '../services/marketHours';
@@ -75,7 +76,9 @@ export default function UnifiedStrategyBasket() {
     isBscMainnet, 
     openModal, 
     switchNetwork, 
-    balances 
+    balances,
+    refreshBalances,
+    sendExtensionTransaction
   } = useWallet();
 
   // Strategy Agent States
@@ -137,9 +140,10 @@ export default function UnifiedStrategyBasket() {
     return () => clearInterval(timer);
   }, []);
 
-  // Fetch Live Wallet Balance directly from on-chain baw
+  // Fetch Live Wallet Balance directly from on-chain BSC
   const fetchLiveBalance = () => {
-    fetch('/api/wallet/balance')
+    const url = address ? `/api/wallet/balance?address=${encodeURIComponent(address)}` : '/api/wallet/balance';
+    fetch(url)
       .then(res => res.json())
       .then(data => {
         if (data.success && data.tokens) {
@@ -147,12 +151,16 @@ export default function UnifiedStrategyBasket() {
           const bnb = data.tokens.find(t => t.symbol === 'BNB');
           setLiveBalance({
             usdt: usdt ? usdt.balance.toFixed(2) : '0.00',
-            bnb: bnb ? bnb.balance.toFixed(5) : '0.00',
+            bnb: bnb ? bnb.balance.toFixed(4) : '0.00',
             totalUsd: data.totalValueUsd ? data.totalValueUsd.toFixed(2) : '0.00'
           });
+        } else {
+          setLiveBalance({ usdt: '0.00', bnb: '0.0000', totalUsd: '0.00' });
         }
       })
-      .catch(() => {});
+      .catch(() => {
+        setLiveBalance({ usdt: '0.00', bnb: '0.0000', totalUsd: '0.00' });
+      });
   };
 
   // Fetch Live BSC Equities Watchlist directly from on-chain router
@@ -190,7 +198,7 @@ export default function UnifiedStrategyBasket() {
       clearInterval(watchTimer);
       window.removeEventListener('omnibasket-balance-refresh', onBalanceRefresh);
     };
-  }, []);
+  }, [address]);
 
   // Restore state from localStorage on mount
   useEffect(() => {
@@ -452,13 +460,18 @@ export default function UnifiedStrategyBasket() {
 
     if (!isConnected) {
       openModal();
-      alert('Please connect your wallet (Agentic or Extension) before executing trades.');
+      alert('Please connect your Binance Web3 Wallet extension before executing trades.');
       return;
     }
 
     if (!isBscMainnet) {
       switchNetwork();
       alert('Please switch network to BNB Smart Chain Mainnet (Chain ID 56) to execute trades.');
+      return;
+    }
+
+    if (walletMode === 'agentic') {
+      alert('Agentic Wallet execution is disabled in public mode. Please switch to Binance Web3 Wallet Extension mode to execute with your browser wallet.');
       return;
     }
 
@@ -487,122 +500,101 @@ export default function UnifiedStrategyBasket() {
     }
 
     try {
-      const res = await fetch('/api/wallet/swap', {
+      const fromAmount = action.fromQty || 10;
+      // 1. Build unsigned calldata and run pre-transaction simulation on BSC
+      const buildRes = await fetch('/api/swap/build', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          fromTicker: action.fromTicker,
+          userWalletAddress: address,
+          fromTicker: action.fromTicker || 'USDT',
           toTicker: action.toTicker,
-          fromTokenQty: action.fromQty
+          fromAmount
         })
       });
-      const data = await res.json();
-      if (data.success) {
-        let replyMsg = '';
-        const finalTxHash = data.txHash || data.leg2?.txHash || data.leg1?.txHash;
 
-        if (finalTxHash) {
-          if (data.mode === 'STOCK_TO_STOCK_ROTATION') {
-            replyMsg = `✅ **2-Hop Stock Rotation FINISHED on BSC!**\n\n• **Rotated**: \`${data.fromQty}\` **${data.fromTicker}** → \`${data.toQty}\` **${data.toTicker}**\n• **Leg 1 (Sell to USDT)**: [${data.leg1?.txHash?.slice(0, 10)}...${data.leg1?.txHash?.slice(-8)}](https://bscscan.com/tx/${data.leg1?.txHash})\n• **Leg 2 (Buy ${data.toTicker})**: [${data.leg2?.txHash?.slice(0, 10)}...${data.leg2?.txHash?.slice(-8)}](https://bscscan.com/tx/${data.leg2?.txHash})\n\nTokens are confirmed in your BSC wallet!`;
-          } else {
-            replyMsg = `✅ **Swap FINISHED on BNB Smart Chain!**\n\n• **Transferred**: \`${data.fromQty}\` **${data.fromTicker}** → \`${data.toQty || data.receivedUsdt}\` **${data.toTicker}**\n• **Tx Hash**: [${data.txHash?.slice(0, 10)}...${data.txHash?.slice(-8)}](https://bscscan.com/tx/${data.txHash})\n\nOn-chain balances have updated on BSC Mainnet.`;
-          }
-
-          setMessages(prev => {
-            const updated = prev.map((m, idx) => {
-              if ((actionMsgIdx !== null && idx === actionMsgIdx) || (actionMsgIdx === null && m.action && m.action.type === 'EXECUTE_SWAP' && !m.action.executed)) {
-                return {
-                  ...m,
-                  action: {
-                    ...m.action,
-                    status: 'COMPLETED',
-                    executed: true,
-                    executing: false,
-                    txHash: finalTxHash,
-                    receipt: data
-                  }
-                };
-              }
-              return m;
-            });
-            const withReply = [...updated, { 
-              role: 'assistant', 
-              content: replyMsg,
-              modelUsed: 'Binance Agentic Wallet (On-Chain) ⚡'
-            }];
-            try {
-              localStorage.setItem('omnibasket_chat_history', JSON.stringify(withReply));
-            } catch (_) {}
-            return withReply;
-          });
-
-          // Trigger balance and quote refresh
-          window.dispatchEvent(new Event('omnibasket-balance-refresh'));
-          fetchLiveBalance();
-          fetchQuotes();
-          triggerSyncNotice(`Executed ${action.label} on BSC`);
-          setExecutingSwap(false);
-          setActiveActionIdx(null);
-        } else {
-          // Order submitted with orderId, awaiting confirmation
-          if (data.orderId) {
-            setMessages(prev => {
-              const updated = prev.map((m, idx) => {
-                if ((actionMsgIdx !== null && idx === actionMsgIdx) || (actionMsgIdx === null && m.action && m.action.type === 'EXECUTE_SWAP')) {
-                  return {
-                    ...m,
-                    action: {
-                      ...m.action,
-                      orderId: data.orderId,
-                      status: 'EXECUTING',
-                      executing: true
-                    }
-                  };
-                }
-                return m;
-              });
-              try {
-                localStorage.setItem('omnibasket_chat_history', JSON.stringify(updated));
-              } catch (_) {}
-              return updated;
-            });
-          }
-          // Poll immediately
-          setTimeout(reconcileOrders, 1000);
-        }
-      } else {
-        setMessages(prev => {
-          const updated = prev.map((m, idx) => {
-            if ((actionMsgIdx !== null && idx === actionMsgIdx) || (actionMsgIdx === null && m.action && m.action.type === 'EXECUTE_SWAP' && !m.action.executed)) {
-              return {
-                ...m,
-                action: {
-                  ...m.action,
-                  status: 'FAILED',
-                  executing: false,
-                  error: data.error
-                }
-              };
-            }
-            return m;
-          });
-          const withFail = [...updated, { 
-            role: 'assistant', 
-            content: `❌ **Swap Failed**: ${data.error || 'Transaction failed or rejected by network.'}`,
-            modelUsed: 'BSC Execution Guard 🛡️'
-          }];
-          try {
-            localStorage.setItem('omnibasket_chat_history', JSON.stringify(withFail));
-          } catch (_) {}
-          return withFail;
-        });
-        setExecutingSwap(false);
-        setActiveActionIdx(null);
+      const buildData = await buildRes.json();
+      if (!buildData.success) {
+        throw new Error(buildData.error || 'Failed to construct swap calldata on BSC.');
       }
-    } catch (err) {
+
+      // Pre-transaction simulation guardrail check: Fail Closed
+      if (buildData.simulation?.status === 'SIMULATED_REVERT') {
+        throw new Error(`Pre-Transaction Simulation reverted on BSC: ${buildData.simulation.failReason || 'Simulation revert'}. Execution aborted to protect funds.`);
+      }
+
+      const provider = getInjectedProvider();
+
+      // 2. If ERC20 approval is required, prompt user in extension
+      if (buildData.needsApproval && buildData.approveTx) {
+        triggerSyncNotice(`Requesting token approval in wallet...`);
+        const approveHash = await sendExtensionTransaction({
+          to: buildData.approveTx.to,
+          data: buildData.approveTx.data,
+          value: '0x0'
+        });
+        const approveReceipt = await pollExtensionReceipt(provider, approveHash);
+        if (approveReceipt.status === 'REVERTED') {
+          throw new Error('Token approval transaction reverted on-chain.');
+        }
+      }
+
+      // 3. Prompt user for swap execution in extension
+      triggerSyncNotice(`Requesting swap signature in wallet...`);
+      const swapTxHash = await sendExtensionTransaction({
+        to: buildData.swapTx.to,
+        data: buildData.swapTx.data,
+        value: buildData.swapTx.value || '0x0'
+      });
+
+      // 4. Poll receipt
+      const receipt = await pollExtensionReceipt(provider, swapTxHash);
+      const isReverted = receipt.status === 'REVERTED';
+      const bscScanUrl = `https://bscscan.com/tx/${swapTxHash}`;
+
+      let replyMsg = '';
+      if (isReverted) {
+        replyMsg = `❌ **Swap REVERTED on BNB Smart Chain!**\n\n• **Tx Hash**: [${swapTxHash.slice(0, 10)}...${swapTxHash.slice(-8)}](${bscScanUrl})\n• **Error**: Transaction reverted on-chain. Please verify gas and token liquidity.`;
+      } else {
+        replyMsg = `✅ **Swap CONFIRMED on BNB Smart Chain!**\n\n• **Transferred**: \`${fromAmount}\` **${action.fromTicker || 'USDT'}** → **${action.toTicker}**\n• **Tx Hash**: [${swapTxHash.slice(0, 10)}...${swapTxHash.slice(-8)}](${bscScanUrl})\n\nTokens are confirmed in your Binance Web3 Wallet on BSC Mainnet!`;
+      }
+
       setMessages(prev => {
         const updated = prev.map((m, idx) => {
           if ((actionMsgIdx !== null && idx === actionMsgIdx) || (actionMsgIdx === null && m.action && m.action.type === 'EXECUTE_SWAP' && !m.action.executed)) {
+            return {
+              ...m,
+              action: {
+                ...m.action,
+                status: isReverted ? 'FAILED' : 'COMPLETED',
+                executed: !isReverted,
+                executing: false,
+                txHash: swapTxHash,
+                receipt
+              }
+            };
+          }
+          return m;
+        });
+        const withReply = [...updated, { 
+          role: 'assistant', 
+          content: replyMsg,
+          modelUsed: 'Binance Web3 Wallet Extension 🟡'
+        }];
+        try {
+          localStorage.setItem('omnibasket_chat_history', JSON.stringify(withReply));
+        } catch (_) {}
+        return withReply;
+      });
+
+      window.dispatchEvent(new Event('omnibasket-balance-refresh'));
+      refreshBalances();
+      fetchQuotes();
+      triggerSyncNotice(`Executed swap on BSC`);
+    } catch (err) {
+      setMessages(prev => {
+        const updated = prev.map((m, idx) => {
+          if ((actionMsgIdx !== null && idx === actionMsgIdx) || (actionMsgIdx === null && m.action && m.action.type === 'EXECUTE_SWAP')) {
             return {
               ...m,
               action: {
@@ -617,13 +609,14 @@ export default function UnifiedStrategyBasket() {
         });
         const withErr = [
           ...updated, 
-          { role: 'assistant', content: `❌ **Execution Call Error**: ${err.message}. Check order status or retry.` }
+          { role: 'assistant', content: `❌ **Execution Call Error**: ${err.message}. Check wallet or retry.` }
         ];
         try {
           localStorage.setItem('omnibasket_chat_history', JSON.stringify(withErr));
         } catch (_) {}
         return withErr;
       });
+    } finally {
       setExecutingSwap(false);
       setActiveActionIdx(null);
     }
@@ -673,7 +666,8 @@ export default function UnifiedStrategyBasket() {
         body: JSON.stringify({ 
           message: userText,
           model: selectedModel,
-          apiKey: customApiKey
+          apiKey: customApiKey,
+          userAddress: address || null
         })
       });
       const data = await res.json();
@@ -723,7 +717,8 @@ export default function UnifiedStrategyBasket() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           allocations: selectedBasket.allocations,
-          depositAmount
+          depositAmount,
+          userWalletAddress: address || undefined
         })
       });
       const data = await res.json();
@@ -743,7 +738,7 @@ export default function UnifiedStrategyBasket() {
   const handleExecuteBasket = async () => {
     if (!isConnected) {
       openModal();
-      alert('Please connect your wallet (Agentic or Extension) before executing basket allocations.');
+      alert('Please connect your Binance Web3 Wallet extension before executing basket allocations.');
       return;
     }
 
@@ -753,9 +748,12 @@ export default function UnifiedStrategyBasket() {
       return;
     }
 
-    const confirmMsg = walletMode === 'agentic'
-      ? `Broadcast multi-leg allocation of $${depositAmount} USDT on BNB Smart Chain via Binance Agentic Wallet (Autonomous Keyless MPC)?`
-      : `Broadcast multi-leg allocation of $${depositAmount} USDT on BNB Smart Chain via Extension Wallet (${address})?`;
+    if (walletMode === 'agentic') {
+      alert('Agentic Wallet execution is disabled in public mode. Please switch to Binance Web3 Wallet Extension mode to execute with your browser wallet.');
+      return;
+    }
+
+    const confirmMsg = `Broadcast multi-leg allocation of $${depositAmount} USDT on BNB Smart Chain via Binance Web3 Wallet (${address.slice(0, 6)}...${address.slice(-4)})? Each leg will request your approval and signature in your wallet extension.`;
 
     if (!confirm(confirmMsg)) {
       return;
@@ -765,29 +763,137 @@ export default function UnifiedStrategyBasket() {
     setExecutionResult(null);
 
     try {
-      const res = await fetch('/api/execute', {
+      // Step 1: Pre-Transaction Simulation Guardrail
+      const simRes = await fetch('/api/simulate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           allocations: selectedBasket.allocations,
-          depositAmount
+          depositAmount,
+          userWalletAddress: address
         })
       });
-      const data = await res.json();
-      setExecutionResult(data);
 
-      if (data.success) {
-        triggerSyncNotice(`Execution broadcast finished on BSC!`);
+      const simData = await simRes.json();
+      if (!simRes.ok || !simData.success || simData.overallStatus === 'REVERT_BLOCKED') {
+        const revertLeg = simData.legs?.find(l => l.simulationStatus === 'SIMULATED_REVERT');
+        const failMsg = revertLeg 
+          ? `Simulation reverted on leg ${revertLeg.ticker}: ${revertLeg.failReason || 'Revert'}`
+          : (simData.error || 'Pre-transaction simulation guardrail blocked execution.');
+        
+        setExecutionResult({
+          success: false,
+          summary: `Execution blocked by Pre-Transaction Simulation Guardrail: ${failMsg}`
+        });
+        setExecutingBasket(false);
+        return;
+      }
+
+      // Step 2: Sequentially execute each leg via user's extension
+      const results = [];
+      const provider = getInjectedProvider();
+
+      for (const alloc of selectedBasket.allocations) {
+        const legUsd = (depositAmount * alloc.weight) / 100;
+        if (legUsd < 5) {
+          results.push({
+            ticker: alloc.ticker,
+            name: alloc.name || alloc.ticker,
+            status: 'SKIPPED (< $5.00 min)',
+            success: false,
+            error: 'Below $5.00 minimum floor'
+          });
+          continue;
+        }
+
+        try {
+          // Build calldata for leg
+          const buildRes = await fetch('/api/swap/build', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              userWalletAddress: address,
+              fromTicker: 'USDT',
+              toTicker: alloc.ticker,
+              fromAmount: legUsd
+            })
+          });
+
+          const buildData = await buildRes.json();
+          if (!buildData.success) {
+            throw new Error(buildData.error || `Failed to build calldata for ${alloc.ticker}`);
+          }
+
+          // Approve if necessary
+          if (buildData.needsApproval && buildData.approveTx) {
+            triggerSyncNotice(`Approving USDT for ${alloc.ticker}...`);
+            const approveHash = await sendExtensionTransaction({
+              to: buildData.approveTx.to,
+              data: buildData.approveTx.data,
+              value: '0x0'
+            });
+            await pollExtensionReceipt(provider, approveHash);
+          }
+
+          // Broadcast swap
+          triggerSyncNotice(`Signing swap for ${alloc.ticker}...`);
+          const swapHash = await sendExtensionTransaction({
+            to: buildData.swapTx.to,
+            data: buildData.swapTx.data,
+            value: buildData.swapTx.value || '0x0'
+          });
+
+          // Poll receipt
+          const legReceipt = await pollExtensionReceipt(provider, swapHash);
+          const isConfirmed = legReceipt.status === 'CONFIRMED';
+
+          results.push({
+            ticker: alloc.ticker,
+            name: alloc.name || alloc.ticker,
+            status: isConfirmed ? 'CONFIRMED' : 'REVERTED',
+            success: isConfirmed,
+            txHash: swapHash,
+            bscScanUrl: `https://bscscan.com/tx/${swapHash}`
+          });
+        } catch (err) {
+          results.push({
+            ticker: alloc.ticker,
+            name: alloc.name || alloc.ticker,
+            status: 'FAILED',
+            success: false,
+            error: err.message
+          });
+        }
+      }
+
+      const confirmedCount = results.filter(r => r.success).length;
+      const allSuccess = confirmedCount > 0 && confirmedCount === results.filter(r => r.status !== 'SKIPPED (< $5.00 min)').length;
+
+      setExecutionResult({
+        success: allSuccess,
+        summary: `Executed ${confirmedCount}/${results.length} legs via Binance Web3 Wallet on BSC Mainnet.`,
+        results
+      });
+
+      if (confirmedCount > 0) {
+        triggerSyncNotice(`Basket execution broadcast finished on BSC!`);
         window.dispatchEvent(new Event('omnibasket-balance-refresh'));
-        fetchLiveBalance();
+        refreshBalances();
         fetchQuotes();
+
+        const legSummaries = results
+          .map(r => r.txHash 
+            ? `• **${r.ticker}**: [${r.txHash.slice(0, 10)}...${r.txHash.slice(-8)}](${r.bscScanUrl}) ${r.success ? '✅' : '❌'}`
+            : `• **${r.ticker}**: ${r.error || r.status} ❌`
+          )
+          .join('\n');
 
         setMessages(prev => [
           ...prev,
           {
             role: 'assistant',
-            content: `✅ **Multi-Leg Allocation FINISHED on BSC!**\n\n• **Strategy**: **${selectedBasket.name}**\n• **Capital Allocated**: **$${depositAmount} USDT**\n• ${data.summary || 'All swap legs executed on BSC.'}`,
-            modelUsed: walletMode === 'agentic' ? 'Binance Agentic Wallet ⚡' : 'Binance Web3 Wallet Extension 🟡'
+            content: `✅ **Multi-Leg Allocation COMPLETED on BSC!**\n\n• **Strategy**: **${selectedBasket.name}**\n• **Capital Allocated**: **$${depositAmount} USDT**\n\n**Transactions:**\n${legSummaries}\n\nConfirmed tokens are held in your Binance Web3 Wallet on BSC.`,
+            modelUsed: 'Binance Web3 Wallet Extension 🟡'
           }
         ]);
       }
@@ -796,8 +902,9 @@ export default function UnifiedStrategyBasket() {
         success: false,
         summary: `Execution call error: ${e.message}`
       });
+    } finally {
+      setExecutingBasket(false);
     }
-    setExecutingBasket(false);
   };
 
   const allocationPlan = generateAllocationPlan(depositAmount, selectedBasket.allocations);

@@ -3,6 +3,7 @@ export const revalidate = 0;
 
 import { execFile } from 'child_process';
 import util from 'util';
+import { isAddress } from 'viem';
 import { ensureBawSession } from '../../../../services/bawSession.js';
 import { readBscBalances } from '../../../../services/bscBalanceReader.js';
 
@@ -10,29 +11,39 @@ const execFilePromise = util.promisify(execFile);
 
 export async function GET(req) {
   try {
-    ensureBawSession();
     const { searchParams } = new URL(req.url);
     const targetAddress = searchParams.get('address');
 
-    // 1. If explicit address provided (e.g. Extension Wallet mode), query on-chain via viem
-    if (targetAddress && targetAddress.startsWith('0x') && targetAddress.length === 42) {
+    // 1. If explicit address provided (e.g. Extension Wallet mode), query on-chain via viem on BSC #56
+    if (targetAddress) {
+      if (!isAddress(targetAddress)) {
+        return Response.json({ success: false, error: 'Invalid BSC address provided.' }, { status: 400 });
+      }
       const onchainData = await readBscBalances(targetAddress);
       return Response.json(onchainData);
     }
 
-    // 2. Default Agentic Wallet flow via baw CLI
-    const defaultAddress = process.env.AGENTIC_WALLET_ADDRESS || '0x03A48c451B8cbE0bed6172eeaaE84a9B20505283';
+    // 2. If no address passed, check if Agentic mode is explicitly enabled
+    const isAgenticEnabled = process.env.ENABLE_AGENTIC_WALLET === 'true';
+    if (!isAgenticEnabled) {
+      return Response.json({ 
+        success: false, 
+        error: 'Agentic Wallet unavailable in public mode. Connect your browser extension to view balances.' 
+      }, { status: 503 });
+    }
+
+    ensureBawSession();
 
     try {
       const { stdout } = await execFilePromise('baw', ['wallet', 'balance', '--binanceChainId', '56', '--json']);
       const parsed = JSON.parse(stdout);
 
-      if (parsed.success && parsed.data && Array.isArray(parsed.data) && parsed.data.length > 0) {
+      if (parsed.success && parsed.data && Array.isArray(parsed.data)) {
         const totalUsd = parsed.data.reduce((sum, item) => sum + parseFloat(item.value || 0), 0);
         return Response.json({
           success: true,
           mode: 'baw-cli',
-          address: defaultAddress,
+          address: null,
           network: 'BNB Smart Chain (BSC)',
           chainId: 56,
           totalValueUsd: parseFloat(totalUsd.toFixed(2)),
@@ -46,16 +57,12 @@ export async function GET(req) {
           }))
         });
       }
-    } catch (cliErr) {
-      // CLI is not logged in or threw - proceed to on-chain fallback
-    }
+    } catch (_) {}
 
-    // 3. Fallback: query on-chain data for the agent address
-    const fallbackData = await readBscBalances(defaultAddress);
-    return Response.json({
-      ...fallbackData,
-      mode: 'agentic-onchain-verified'
-    });
+    return Response.json({ 
+      success: false, 
+      error: 'Agentic Wallet session unauthenticated.' 
+    }, { status: 503 });
   } catch (error) {
     console.error('Wallet balance API error:', error);
     return Response.json({ success: false, error: error.message }, { status: 500 });

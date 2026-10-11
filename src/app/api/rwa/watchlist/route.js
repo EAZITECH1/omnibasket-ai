@@ -3,7 +3,7 @@ export const revalidate = 0;
 
 import { execFile } from 'child_process';
 import util from 'util';
-import { BSC_RWA_TOKENS } from '../../../../services/tokens';
+import { BSC_RWA_TOKENS } from '../../../../services/tokens.js';
 
 const execFilePromise = util.promisify(execFile);
 const USDT_ADDRESS = BSC_RWA_TOKENS.USDT.contractAddress;

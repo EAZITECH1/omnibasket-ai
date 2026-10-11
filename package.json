@@ -8,6 +8,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "test": "node src/test-suite.js",
     "test-tokens": "node src/test-tokens.js",
     "test-quote": "node --env-file=.env src/test-quote.js"
   },

@@ -43,22 +43,25 @@ export async function fetchWithX402Payment(targetUrl, options = {}) {
     throw new Error('x402 payment requirements must specify BNB Smart Chain (eip155:56).');
   }
 
-  // Step 2: Use Binance Agentic Wallet (`baw`) to preview payment options
+  // Step 2: Use Binance Agentic Wallet (`baw`) to preview payment options if enabled
   const reqStr = JSON.stringify(initialBody);
+  const isAgenticEnabled = process.env.ENABLE_AGENTIC_WALLET === 'true';
 
   let previewResult = null;
-  try {
-    const { stdout } = await execFilePromise('baw', [
-      'x402-payment', 'preview',
-      '--paymentRequirements', reqStr,
-      '--json'
-    ]);
-    previewResult = JSON.parse(stdout);
-  } catch (err) {
-    if (err.stdout) {
-      try {
-        previewResult = JSON.parse(err.stdout);
-      } catch (_) {}
+  if (isAgenticEnabled) {
+    try {
+      const { stdout } = await execFilePromise('baw', [
+        'x402-payment', 'preview',
+        '--paymentRequirements', reqStr,
+        '--json'
+      ]);
+      previewResult = JSON.parse(stdout);
+    } catch (err) {
+      if (err.stdout) {
+        try {
+          previewResult = JSON.parse(err.stdout);
+        } catch (_) {}
+      }
     }
   }
 
@@ -81,24 +84,30 @@ export async function fetchWithX402Payment(targetUrl, options = {}) {
   let paymentHeaderName = 'PAYMENT-SIGNATURE';
   let paymentHeaderValue = '';
 
-  // Step 3: Attempt Sign via `baw` or require explicit demo mode for fallback
-  try {
-    const { stdout } = await execFilePromise('baw', [
-      'x402-payment', 'sign',
-      '--paymentId', paymentId,
-      '--selectedIndex', '1',
-      '--json'
-    ]);
-    const signResult = JSON.parse(stdout);
-    if (signResult.success && signResult.data?.paymentHeaderValue) {
-      paymentHeaderName = signResult.data.paymentHeaderName;
-      paymentHeaderValue = signResult.data.paymentHeaderValue;
+  // Step 3: Attempt Sign via `baw` if enabled or require explicit demo mode for fallback
+  if (isAgenticEnabled) {
+    try {
+      const { stdout } = await execFilePromise('baw', [
+        'x402-payment', 'sign',
+        '--paymentId', paymentId,
+        '--selectedIndex', '1',
+        '--json'
+      ]);
+      const signResult = JSON.parse(stdout);
+      if (signResult.success && signResult.data?.paymentHeaderValue) {
+        paymentHeaderName = signResult.data.paymentHeaderName;
+        paymentHeaderValue = signResult.data.paymentHeaderValue;
+      }
+    } catch (err) {
+      if (!isExplicitDemo) {
+        throw new Error(`Production x402 signing failed via baw on BSC: ${err.message || 'Signature authorization rejected'}`);
+      }
     }
-  } catch (err) {
-    if (!isExplicitDemo) {
-      throw new Error(`Production x402 signing failed via baw on BSC: ${err.message || 'Signature authorization rejected'}`);
-    }
+  } else if (!isExplicitDemo) {
+    throw new Error('Agentic Wallet CLI signing is disabled in public mode. Use Extension Wallet for on-chain signatures.');
+  }
 
+  if (!paymentHeaderValue && isExplicitDemo) {
     // Sandbox / demonstration fallback only: formulate clearly tagged demonstration signature with full schema
     const cleanPaymentId = (paymentId || '721677d83e8d460db58efea3540d16bd').replace(/-/g, '');
     const simSigPayload = {

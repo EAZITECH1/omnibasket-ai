@@ -141,13 +141,13 @@ export default function Navbar() {
             >
               {walletMode === 'agentic' ? (
                 <>
-                  <Zap className="w-3.5 h-3.5 fill-current" />
-                  <span>{isConnecting ? 'CONNECTING...' : 'CONNECT AGENTIC'}</span>
+                  <Zap className="w-3.5 h-3.5 fill-current text-red-400" />
+                  <span>AGENTIC (DISABLED)</span>
                 </>
               ) : (
                 <>
                   <Wallet className="w-3.5 h-3.5" />
-                  <span>{isConnecting ? 'CONNECTING...' : 'CONNECT EXTENSION'}</span>
+                  <span>{isConnecting ? 'CONNECTING...' : 'CONNECT BINANCE WALLET'}</span>
                 </>
               )}
             </button>

@@ -1,11 +1,19 @@
 import { execFile } from 'child_process';
 import util from 'util';
-import { BSC_RWA_TOKENS } from '../../../services/tokens';
+import { BSC_RWA_TOKENS } from '../../../services/tokens.js';
 
 const execFilePromise = util.promisify(execFile);
 const USDT_ADDRESS = BSC_RWA_TOKENS.USDT.contractAddress;
 
 export async function POST(req) {
+  const isAgenticEnabled = process.env.ENABLE_AGENTIC_WALLET === 'true';
+  if (!isAgenticEnabled) {
+    return Response.json({
+      success: false,
+      error: 'Server-side Agentic Wallet execution is disabled in public mode. Please execute trades using Binance Web3 Wallet extension with browser signing.'
+    }, { status: 503 });
+  }
+
   try {
     const body = await req.json().catch(() => ({}));
     const { allocations, depositAmount = 25, allowEstimated = false } = body;

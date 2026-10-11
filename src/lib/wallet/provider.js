@@ -21,14 +21,17 @@ export const BSC_MAINNET_CONFIG = {
  */
 export function parseChainId(chainId) {
   if (chainId === null || chainId === undefined) return null;
-  if (typeof chainId === 'number') return chainId;
-  if (typeof chainId === 'string') {
+  let parsed = null;
+  if (typeof chainId === 'number') {
+    parsed = chainId;
+  } else if (typeof chainId === 'string') {
     if (chainId.startsWith('0x') || chainId.startsWith('0X')) {
-      return parseInt(chainId, 16);
+      parsed = parseInt(chainId, 16);
+    } else {
+      parsed = parseInt(chainId, 10);
     }
-    return parseInt(chainId, 10);
   }
-  return null;
+  return (typeof parsed === 'number' && !isNaN(parsed)) ? parsed : null;
 }
 
 /**
@@ -40,7 +43,7 @@ export function formatAddress(address) {
 }
 
 /**
- * Safely detect injected provider in browser environment
+ * Safely detect Binance Web3 Wallet or Injected Provider
  */
 export function getInjectedProvider() {
   if (typeof window === 'undefined') return null;
@@ -73,7 +76,7 @@ export function getInjectedProvider() {
     return window.ethereum;
   }
 
-  // 6. Fallback to standard window.ethereum (e.g. generic injected EVM)
+  // 6. Fallback to generic window.ethereum (clearly marked as non-Binance in getProviderInfo)
   if (window.ethereum) {
     return window.ethereum;
   }
@@ -87,7 +90,7 @@ export function getInjectedProvider() {
 export function getProviderInfo(provider) {
   if (!provider) {
     return {
-      name: 'Not Detected',
+      name: 'Not Installed',
       isBinance: false,
       isInstalled: false,
       installUrl: 'https://www.binance.com/en/web3wallet'
@@ -120,19 +123,45 @@ export function getProviderInfo(provider) {
 
   if (provider.isMetaMask) {
     return {
-      name: 'MetaMask (Injected)',
+      name: 'MetaMask (Injected EVM)',
       isBinance: false,
       isInstalled: true,
-      installUrl: 'https://metamask.io/'
+      installUrl: 'https://www.binance.com/en/web3wallet'
     };
   }
 
   return {
-    name: 'Browser Injected Wallet',
+    name: 'Injected EVM Wallet',
     isBinance: false,
     isInstalled: true,
     installUrl: 'https://www.binance.com/en/web3wallet'
   };
+}
+
+/**
+ * Check if the active provider has an already-approved account via eth_accounts (no popup)
+ */
+export async function checkActiveAccount(provider) {
+  if (!provider || typeof provider.request !== 'function') return null;
+  try {
+    const accounts = await provider.request({ method: 'eth_accounts' });
+    if (Array.isArray(accounts) && accounts.length > 0 && accounts[0]) {
+      return accounts[0];
+    }
+  } catch (_) {}
+  return null;
+}
+
+/**
+ * Check current chain ID via eth_chainId
+ */
+export async function checkChainId(provider) {
+  if (!provider || typeof provider.request !== 'function') return null;
+  try {
+    const chainHex = await provider.request({ method: 'eth_chainId' });
+    return parseChainId(chainHex);
+  } catch (_) {}
+  return null;
 }
 
 /**
@@ -193,5 +222,38 @@ export function initEip6963Discovery(onAnnounce) {
 
   return () => {
     window.removeEventListener('eip6963:announceProvider', handleAnnouncement);
+  };
+}
+
+/**
+ * Poll transaction receipt status using the active provider
+ */
+export async function pollExtensionReceipt(provider, txHash, maxAttempts = 30, intervalMs = 2000) {
+  if (!provider || !txHash) return { status: 'UNKNOWN', txHash };
+
+  for (let i = 0; i < maxAttempts; i++) {
+    try {
+      const receipt = await provider.request({
+        method: 'eth_getTransactionReceipt',
+        params: [txHash]
+      });
+
+      if (receipt) {
+        const isSuccess = receipt.status === '0x1' || receipt.status === 1 || receipt.status === true;
+        return {
+          status: isSuccess ? 'CONFIRMED' : 'REVERTED',
+          blockNumber: receipt.blockNumber,
+          txHash,
+          bscScanUrl: `https://bscscan.com/tx/${txHash}`
+        };
+      }
+    } catch (_) {}
+    await new Promise(r => setTimeout(r, intervalMs));
+  }
+
+  return { 
+    status: 'PENDING', 
+    txHash, 
+    bscScanUrl: `https://bscscan.com/tx/${txHash}` 
   };
 }

@@ -6,6 +6,8 @@ import {
   getProviderInfo, 
   switchToBscMainnet, 
   parseChainId, 
+  checkActiveAccount,
+  checkChainId,
   initEip6963Discovery,
   BSC_MAINNET_CONFIG 
 } from '../lib/wallet/provider.js';
@@ -13,23 +15,22 @@ import {
 const WalletContext = createContext(null);
 
 export function WalletProvider({ children }) {
-  // State: 'agentic' | 'extension'
-  const [walletMode, setWalletModeState] = useState('agentic');
+  // Mode: defaults to 'extension' for public security
+  const [walletMode, setWalletModeState] = useState('extension');
   const [isConnecting, setIsConnecting] = useState(false);
   const [address, setAddress] = useState(null);
   const [chainId, setChainId] = useState(56);
   const [balances, setBalances] = useState({
-    usdt: '...',
-    bnb: '...',
-    totalUsd: '...',
+    usdt: '0.00',
+    bnb: '0.0000',
+    totalUsd: '0.00',
     tokens: []
   });
   const [agenticInfo, setAgenticInfo] = useState({
-    status: 'UNKNOWN',
-    address: '0x03A48c451B8cbE0bed6172eeaaE84a9B20505283',
-    quota: null,
-    session: null,
-    isDemoFallback: true
+    enabled: false,
+    status: 'UNAVAILABLE',
+    address: null,
+    message: 'Agentic Wallet unavailable in public mode. Shared server-side wallet has been disabled for multi-user security.'
   });
   const [providerInfo, setProviderInfo] = useState({
     name: 'Detecting...',
@@ -42,63 +43,87 @@ export function WalletProvider({ children }) {
 
   const activeProviderRef = useRef(null);
 
-  // 1. Initialize EIP-6963 & provider detection on mount
+  // 1. Initialize EIP-6963 & provider detection on mount (never auto-connect from localStorage alone)
   useEffect(() => {
     const unsub = initEip6963Discovery((provider) => {
       activeProviderRef.current = provider;
       setProviderInfo(getProviderInfo(provider));
+      // Revalidate active account if already authorized in extension
+      checkActiveAccount(provider).then((acc) => {
+        if (acc) {
+          setAddress(acc);
+          checkChainId(provider).then((cid) => {
+            if (cid) setChainId(cid);
+          });
+        }
+      });
     });
 
     const initialProvider = getInjectedProvider();
     if (initialProvider) {
       activeProviderRef.current = initialProvider;
       setProviderInfo(getProviderInfo(initialProvider));
+      // Revalidate account with provider via eth_accounts
+      checkActiveAccount(initialProvider).then((acc) => {
+        if (acc) {
+          setAddress(acc);
+          checkChainId(initialProvider).then((cid) => {
+            if (cid) setChainId(cid);
+          });
+        }
+      });
     } else {
       setProviderInfo(getProviderInfo(null));
     }
 
-    // Restore saved mode
+    // Default to extension mode; restore mode only if valid
     try {
       const savedMode = localStorage.getItem('omnibasket_wallet_mode');
-      if (savedMode === 'agentic' || savedMode === 'extension') {
-        setWalletModeState(savedMode);
+      if (savedMode === 'extension') {
+        setWalletModeState('extension');
       }
     } catch (_) {}
 
     return () => unsub();
   }, []);
 
-  // 2. Fetch Agentic Wallet Status
+  // 2. Fetch Agentic Wallet Status (strictly checks availability, never sets connected address)
   const fetchAgenticStatus = useCallback(async () => {
     try {
       const res = await fetch('/api/wallet/status');
       const data = await res.json();
-      if (data.success) {
+      if (data) {
         setAgenticInfo({
-          status: data.status,
-          address: data.address,
-          quota: data.quota,
-          session: data.session,
-          isDemoFallback: !!data.isDemoFallback
+          enabled: !!data.enabled,
+          status: data.status || 'UNAVAILABLE',
+          address: data.enabled ? data.address : null,
+          message: data.message || 'Agentic Wallet unavailable in public mode.'
         });
-        if (walletMode === 'agentic') {
-          setAddress(data.address);
-          setChainId(56);
-        }
       }
     } catch (err) {
-      console.warn('Failed to fetch agentic status:', err);
+      setAgenticInfo({
+        enabled: false,
+        status: 'UNAVAILABLE',
+        address: null,
+        message: 'Agentic Wallet service unavailable.'
+      });
     }
-  }, [walletMode]);
+  }, []);
 
-  // 3. Fetch Balances
+  // 3. Fetch Balances for connected extension address on BSC Chain ID 56
   const refreshBalances = useCallback(async () => {
-    try {
-      const targetUrl = (walletMode === 'extension' && address)
-        ? `/api/wallet/balance?address=${encodeURIComponent(address)}`
-        : '/api/wallet/balance';
+    if (!address) {
+      setBalances({
+        usdt: '0.00',
+        bnb: '0.0000',
+        totalUsd: '0.00',
+        tokens: []
+      });
+      return;
+    }
 
-      const res = await fetch(targetUrl, { cache: 'no-store' });
+    try {
+      const res = await fetch(`/api/wallet/balance?address=${encodeURIComponent(address)}`, { cache: 'no-store' });
       const data = await res.json();
 
       if (data.success && data.tokens) {
@@ -113,9 +138,9 @@ export function WalletProvider({ children }) {
         });
       }
     } catch (err) {
-      console.warn('Failed to fetch wallet balances:', err);
+      console.warn('Failed to fetch extension wallet balances on BSC:', err);
     }
-  }, [walletMode, address]);
+  }, [address]);
 
   // 4. Set Wallet Mode
   const setWalletMode = (mode) => {
@@ -128,27 +153,10 @@ export function WalletProvider({ children }) {
 
     if (mode === 'agentic') {
       fetchAgenticStatus();
-    } else {
-      // In extension mode, check if already connected
-      const provider = getInjectedProvider();
-      if (provider) {
-        activeProviderRef.current = provider;
-        setProviderInfo(getProviderInfo(provider));
-      }
-      try {
-        const wasConnected = localStorage.getItem('omnibasket_extension_connected') === 'true';
-        if (wasConnected && provider) {
-          connectExtension(false);
-        } else {
-          setAddress(null);
-        }
-      } catch (_) {
-        setAddress(null);
-      }
     }
   };
 
-  // 5. Connect Extension Wallet
+  // 5. Connect Extension Wallet (Requires explicit user interaction)
   const connectExtension = async (userInitiated = true) => {
     setIsConnecting(true);
     setError(null);
@@ -165,7 +173,7 @@ export function WalletProvider({ children }) {
     setProviderInfo(getProviderInfo(provider));
 
     try {
-      // Request accounts
+      // Explicit request for accounts
       const accounts = await provider.request({ method: 'eth_requestAccounts' });
       if (!accounts || accounts.length === 0) {
         throw new Error('No accounts selected by user.');
@@ -173,12 +181,12 @@ export function WalletProvider({ children }) {
       const activeAccount = accounts[0];
       setAddress(activeAccount);
 
-      // Read current chainId
+      // Read chain ID
       const currentChainHex = await provider.request({ method: 'eth_chainId' });
       const currentChain = parseChainId(currentChainHex);
       setChainId(currentChain);
 
-      // Verify and prompt switch to BSC Mainnet (56) if on wrong chain
+      // Prompt switch to BSC Mainnet (56) if on wrong chain
       if (currentChain !== 56) {
         try {
           await switchToBscMainnet(provider);
@@ -188,7 +196,7 @@ export function WalletProvider({ children }) {
         }
       }
 
-      // Setup listeners on provider
+      // Provider event listeners
       const handleAccountsChanged = (accs) => {
         if (!accs || accs.length === 0) {
           disconnect();
@@ -212,10 +220,6 @@ export function WalletProvider({ children }) {
         provider.on('disconnect', handleDisconnect);
       }
 
-      try {
-        localStorage.setItem('omnibasket_extension_connected', 'true');
-      } catch (_) {}
-
     } catch (err) {
       console.error('Extension connect error:', err);
       if (err.code === 4001) {
@@ -230,19 +234,13 @@ export function WalletProvider({ children }) {
 
   // 6. Connect Agentic Wallet
   const connectAgentic = async () => {
-    setIsConnecting(true);
-    setError(null);
-    try {
-      await fetchAgenticStatus();
-      setChainId(56);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setIsConnecting(false);
+    await fetchAgenticStatus();
+    if (!agenticInfo.enabled) {
+      setError('Agentic Wallet is unavailable in public mode.');
     }
   };
 
-  // 7. General Connect function based on active mode
+  // 7. General Connect function
   const connect = async () => {
     if (walletMode === 'agentic') {
       await connectAgentic();
@@ -251,14 +249,9 @@ export function WalletProvider({ children }) {
     }
   };
 
-  // 8. Disconnect
+  // 8. Disconnect Extension
   const disconnect = () => {
-    if (walletMode === 'extension') {
-      setAddress(null);
-      try {
-        localStorage.removeItem('omnibasket_extension_connected');
-      } catch (_) {}
-    }
+    setAddress(null);
     setError(null);
   };
 
@@ -278,36 +271,51 @@ export function WalletProvider({ children }) {
     }
   };
 
-  // 10. Sync balances and status on mode or address changes
-  useEffect(() => {
-    if (walletMode === 'agentic') {
-      fetchAgenticStatus();
+  // 10. Direct Extension Transaction Broadcast (eth_sendTransaction)
+  const sendExtensionTransaction = async ({ to, data, value = '0x0' }) => {
+    if (!address) {
+      throw new Error('Please connect your Binance Web3 Wallet first.');
     }
-    refreshBalances();
+    if (chainId !== 56) {
+      throw new Error('Please switch network to BNB Smart Chain (Chain ID: 56).');
+    }
 
-    const interval = setInterval(() => {
-      if (walletMode === 'agentic') {
-        fetchAgenticStatus();
-      }
+    const provider = activeProviderRef.current || getInjectedProvider();
+    if (!provider) {
+      throw new Error('No browser wallet extension provider found.');
+    }
+
+    // Call eth_sendTransaction directly through the browser injected provider
+    const txHash = await provider.request({
+      method: 'eth_sendTransaction',
+      params: [{
+        from: address,
+        to,
+        data,
+        value: value || '0x0'
+      }]
+    });
+
+    return txHash;
+  };
+
+  // 11. Sync balances on address change
+  useEffect(() => {
+    if (address) {
       refreshBalances();
-    }, 8000);
-
-    const onGlobalRefresh = () => {
-      if (walletMode === 'agentic') fetchAgenticStatus();
-      refreshBalances();
-    };
-
-    window.addEventListener('omnibasket-balance-refresh', onGlobalRefresh);
-
-    return () => {
-      clearInterval(interval);
-      window.removeEventListener('omnibasket-balance-refresh', onGlobalRefresh);
-    };
-  }, [walletMode, address, fetchAgenticStatus, refreshBalances]);
+      const interval = setInterval(refreshBalances, 8000);
+      const onGlobalRefresh = () => refreshBalances();
+      window.addEventListener('omnibasket-balance-refresh', onGlobalRefresh);
+      return () => {
+        clearInterval(interval);
+        window.removeEventListener('omnibasket-balance-refresh', onGlobalRefresh);
+      };
+    }
+  }, [address, refreshBalances]);
 
   const isConnected = !!address;
   const isBscMainnet = chainId === 56;
-  const networkName = isBscMainnet ? 'BSC Mainnet' : (chainId ? `Chain #${chainId}` : 'Unknown');
+  const networkName = isBscMainnet ? 'BSC Mainnet (56)' : (chainId ? `Chain #${chainId}` : 'Unknown');
 
   return (
     <WalletContext.Provider
@@ -329,6 +337,7 @@ export function WalletProvider({ children }) {
         disconnect,
         switchNetwork,
         refreshBalances,
+        sendExtensionTransaction,
         isModalOpen,
         openModal: () => setIsModalOpen(true),
         closeModal: () => setIsModalOpen(false)

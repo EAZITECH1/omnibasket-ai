@@ -1,11 +1,19 @@
 import { execFile } from 'child_process';
 import util from 'util';
-import { BSC_RWA_TOKENS } from '../../../../services/tokens';
+import { BSC_RWA_TOKENS } from '../../../../services/tokens.js';
 
 const execFilePromise = util.promisify(execFile);
 const USDT_ADDRESS = BSC_RWA_TOKENS.USDT.contractAddress;
 
 export async function POST(req) {
+  const isAgenticEnabled = process.env.ENABLE_AGENTIC_WALLET === 'true';
+  if (!isAgenticEnabled) {
+    return Response.json({
+      success: false,
+      error: 'Shared Agentic Wallet liquidation is disabled in public mode. Please execute trades using your connected browser extension.'
+    }, { status: 503 });
+  }
+
   try {
     let { fromToken, fromTokenQty, fromSymbol } = await req.json().catch(() => ({}));
 

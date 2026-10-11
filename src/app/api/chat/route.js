@@ -1,8 +1,8 @@
 import { execFile } from 'child_process';
 import util from 'util';
-import { BSC_RWA_TOKENS, PRESET_BASKETS } from '../../../services/tokens';
-import { getMarketHoursStatus } from '../../../services/marketHours';
-import { ensureBawSession } from '../../../services/bawSession';
+import { BSC_RWA_TOKENS, PRESET_BASKETS } from '../../../services/tokens.js';
+import { getMarketHoursStatus } from '../../../services/marketHours.js';
+import { readBscBalances } from '../../../services/bscBalanceReader.js';
 
 const execFilePromise = util.promisify(execFile);
 const USDT_ADDRESS = BSC_RWA_TOKENS.USDT.contractAddress;
@@ -29,36 +29,51 @@ function resolveTicker(word) {
 
 export async function POST(req) {
   try {
-    ensureBawSession();
-    const { message, model = 'omnibasket-neuro', apiKey } = await req.json();
+    const { message, model = 'omnibasket-neuro', apiKey, userAddress } = await req.json();
     const userPrompt = (message || '').trim();
     const lower = userPrompt.toLowerCase();
     const marketStatus = getMarketHoursStatus();
 
-    const activeGeminiKey = apiKey || process.env.GEMINI_API_KEY;
-    const activeOpenAiKey = apiKey || process.env.OPENAI_API_KEY || process.env.OPENROUTER_API_KEY;
+    const activeOpenAiKey = apiKey || process.env.OPENROUTER_API_KEY;
     const isOpenRouterKey = (apiKey && apiKey.startsWith('sk-or-')) || (!apiKey && !!process.env.OPENROUTER_API_KEY);
+    const activeGeminiKey = process.env.GEMINI_API_KEY || null;
 
-    // Helper to get real wallet state via Binance Agentic Wallet (baw)
+    // Read real user wallet state via BSC on-chain reader if connected extension address is provided
     let liveWallet = { connected: false, usdtBal: 0, bnbBal: 0, heldStocks: [], tokens: [] };
-    try {
-      const { stdout: balOut } = await execFilePromise('baw', ['wallet', 'balance', '--binanceChainId', '56', '--json']);
-      const balParsed = JSON.parse(balOut);
-      if (balParsed.success && Array.isArray(balParsed.data)) {
-        const balList = balParsed.data;
-        const usdtToken = balList.find(t => t.address.toLowerCase() === USDT_ADDRESS.toLowerCase());
-        const bnbToken = balList.find(t => t.address.toLowerCase() === '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee');
-        const usdtBal = usdtToken ? parseFloat(usdtToken.balance || 0) : 0;
-        const bnbBal = bnbToken ? parseFloat(bnbToken.balance || 0) : 0;
-        const heldStocks = balList.filter(t => 
-          t.address.toLowerCase() !== USDT_ADDRESS.toLowerCase() &&
-          t.address.toLowerCase() !== '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' &&
-          parseFloat(t.balance || 0) > 0.000001
-        );
-        liveWallet = { connected: true, usdtBal, bnbBal, heldStocks, tokens: balList };
+    if (userAddress && userAddress.startsWith('0x') && userAddress.length === 42) {
+      try {
+        const onchain = await readBscBalances(userAddress);
+        if (onchain && onchain.success && Array.isArray(onchain.tokens)) {
+          const usdtToken = onchain.tokens.find(t => t.symbol === 'USDT');
+          const bnbToken = onchain.tokens.find(t => t.symbol === 'BNB');
+          const usdtBal = usdtToken ? usdtToken.balance : 0;
+          const bnbBal = bnbToken ? bnbToken.balance : 0;
+          const heldStocks = onchain.tokens.filter(t => 
+            t.symbol !== 'USDT' && t.symbol !== 'BNB' && t.balance > 0.000001
+          );
+          liveWallet = { connected: true, usdtBal, bnbBal, heldStocks, tokens: onchain.tokens };
+        }
+      } catch (e) {
+        console.warn('On-chain balance query notice in chat:', e.message);
       }
-    } catch (e) {
-      console.warn('Wallet balance query warning:', e.message);
+    } else if (process.env.ENABLE_AGENTIC_WALLET === 'true') {
+      try {
+        const { stdout: balOut } = await execFilePromise('baw', ['wallet', 'balance', '--binanceChainId', '56', '--json']);
+        const balParsed = JSON.parse(balOut);
+        if (balParsed.success && Array.isArray(balParsed.data)) {
+          const balList = balParsed.data;
+          const usdtToken = balList.find(t => t.address.toLowerCase() === USDT_ADDRESS.toLowerCase());
+          const bnbToken = balList.find(t => t.address.toLowerCase() === '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee');
+          const usdtBal = usdtToken ? parseFloat(usdtToken.balance || 0) : 0;
+          const bnbBal = bnbToken ? parseFloat(bnbToken.balance || 0) : 0;
+          const heldStocks = balList.filter(t => 
+            t.address.toLowerCase() !== USDT_ADDRESS.toLowerCase() &&
+            t.address.toLowerCase() !== '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' &&
+            parseFloat(t.balance || 0) > 0.000001
+          );
+          liveWallet = { connected: true, usdtBal, bnbBal, heldStocks, tokens: balList };
+        }
+      } catch (_) {}
     }
 
     // Detect explicit deposit/order size intent in prompt (e.g. "$50", "25 USDT", "$10", "order size 50", "allocate $50")
@@ -272,24 +287,9 @@ export async function POST(req) {
             const cleanTicker = targetStock.symbol.replace(/on$/i, '');
             let estimatedUsdt = (parseFloat(targetStock.balance) * (parseFloat(targetStock.price) || 150)).toFixed(2);
 
-            try {
-              const { stdout: qOut } = await execFilePromise('baw', [
-                'market-order', 'quote',
-                '--fromTokenQty', targetStock.balance.toString(),
-                '--fromToken', targetStock.address,
-                '--toToken', USDT_ADDRESS,
-                '--binanceChainId', '56',
-                '--json'
-              ]);
-              const qParsed = JSON.parse(qOut);
-              if (qParsed.success && qParsed.data?.toCoinAmount) {
-                estimatedUsdt = parseFloat(qParsed.data.toCoinAmount).toFixed(2);
-              }
-            } catch (_) {}
-
             return Response.json({
               type: 'TRADE_PROPOSAL',
-              reply: `⚡ **Stock Reverse Exit Proposal**:\n\n• **Selling Position**: \`${parseFloat(targetStock.balance).toFixed(6)}\` **${cleanTicker}** (~$${parseFloat(targetStock.value || 0).toFixed(2)} USD)\n• **Destination**: **USDT** on BNB Smart Chain\n• **Estimated Output**: **~${estimatedUsdt} USDT**\n• **Routing**: Direct AMM via PancakeSwap & LiquidMesh on BSC #56\n\nClick **Confirm & Swap to USDT** below to broadcast via **Binance Agentic Wallet**!`,
+              reply: `⚡ **Stock Reverse Exit Proposal**:\n\n• **Selling Position**: \`${parseFloat(targetStock.balance).toFixed(6)}\` **${cleanTicker}** (~$${parseFloat(targetStock.value || 0).toFixed(2)} USD)\n• **Destination**: **USDT** on BNB Smart Chain\n• **Estimated Output**: **~${estimatedUsdt} USDT**\n• **Routing**: Direct AMM via PancakeSwap on BSC #56\n\nClick **Confirm & Swap to USDT** below to sign and broadcast with your **connected Binance Web3 Wallet**!`,
               action: {
                 type: 'EXECUTE_SWAP',
                 mode: 'REVERSE_EXIT_TO_USDT',

@@ -2,8 +2,8 @@ export const dynamic = 'force-dynamic';
 
 import { execFile } from 'child_process';
 import util from 'util';
-import { BSC_RWA_TOKENS } from '../../../../services/tokens';
-import { ensureBawSession } from '../../../../services/bawSession';
+import { BSC_RWA_TOKENS } from '../../../../services/tokens.js';
+import { ensureBawSession } from '../../../../services/bawSession.js';
 
 const execFilePromise = util.promisify(execFile);
 const USDT_ADDRESS = BSC_RWA_TOKENS.USDT.contractAddress;
@@ -28,6 +28,14 @@ async function pollOrder(orderId, maxAttempts = 12, intervalMs = 1200) {
 }
 
 export async function POST(req) {
+  const isAgenticEnabled = process.env.ENABLE_AGENTIC_WALLET === 'true';
+  if (!isAgenticEnabled) {
+    return Response.json({
+      success: false,
+      error: 'Shared Agentic Wallet execution is disabled in public mode. Please connect your Binance Web3 Wallet extension to approve and broadcast trades directly.'
+    }, { status: 503 });
+  }
+
   try {
     ensureBawSession();
     const body = await req.json().catch(() => ({}));

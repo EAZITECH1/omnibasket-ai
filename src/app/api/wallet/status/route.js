@@ -9,21 +9,33 @@ import {
 } from '../../../../services/bawSession.js';
 
 export async function GET() {
+  const isAgenticEnabled = process.env.ENABLE_AGENTIC_WALLET === 'true';
+
+  if (!isAgenticEnabled) {
+    return Response.json({
+      success: true,
+      mode: 'agentic',
+      enabled: false,
+      connected: false,
+      address: null,
+      status: 'UNAVAILABLE',
+      message: 'Agentic Wallet unavailable in public mode. Shared server-side wallet has been disabled for multi-user security. Please connect via Binance Web3 Wallet extension.',
+      chainId: 56,
+      network: 'BNB Smart Chain (BSC)'
+    });
+  }
+
   try {
     const sessionInfo = getBawSessionInfo();
     const statusRes = await getAgenticWalletStatus();
     const quotaRes = await getAgenticWalletQuota();
     const addressRes = await getAgenticWalletAddress();
 
-    // Default or configured address
-    const defaultAddress = process.env.AGENTIC_WALLET_ADDRESS || '0x03A48c451B8cbE0bed6172eeaaE84a9B20505283';
-    
-    // Determine connection state
     const cliStatus = statusRes.success && statusRes.data ? statusRes.data.status : 'UNCONNECTED';
     const isConnected = cliStatus === 'CONNECTED' || cliStatus === 'AUTHORIZED';
     
-    let resolvedAddress = defaultAddress;
-    if (addressRes.success && addressRes.addresses) {
+    let resolvedAddress = null;
+    if (isConnected && addressRes.success && addressRes.addresses) {
       if (typeof addressRes.addresses === 'string') {
         resolvedAddress = addressRes.addresses;
       } else if (Array.isArray(addressRes.addresses) && addressRes.addresses.length > 0) {
@@ -34,6 +46,7 @@ export async function GET() {
     return Response.json({
       success: true,
       mode: 'agentic',
+      enabled: true,
       connected: isConnected,
       status: cliStatus,
       address: resolvedAddress,
@@ -41,20 +54,18 @@ export async function GET() {
       network: 'BNB Smart Chain (BSC)',
       session: {
         exists: sessionInfo.exists,
-        hasClientId: sessionInfo.hasClientId,
-        clientIdSnippet: sessionInfo.clientIdSnippet
+        hasClientId: sessionInfo.hasClientId
       },
-      quota: quotaRes.success ? quotaRes.data : { dailyLimit: 1000, remaining: 1000 },
-      isDemoFallback: !isConnected
+      quota: quotaRes.success ? quotaRes.data : null
     });
   } catch (err) {
-    console.error('Wallet status API error:', err);
     return Response.json({
       success: false,
-      error: err.message,
+      error: 'Agentic Wallet service unavailable',
       mode: 'agentic',
+      enabled: true,
       connected: false,
       chainId: 56
-    }, { status: 500 });
+    }, { status: 503 });
   }
 }
