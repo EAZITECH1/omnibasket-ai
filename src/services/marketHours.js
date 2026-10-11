@@ -6,20 +6,31 @@
 export function getMarketHoursStatus() {
   const now = new Date();
 
-  // Convert to US Eastern Time (EST/EDT)
-  const nyTimeString = now.toLocaleString("en-US", { timeZone: "America/New_York" });
-  const nyDate = new Date(nyTimeString);
+  // Convert to US Eastern Time (EST/EDT) safely via formatToParts
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    weekday: 'short',
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: 'numeric',
+    second: 'numeric',
+    hour12: false
+  });
 
-  const dayOfWeek = nyDate.getDay(); // 0 = Sunday, 6 = Saturday
-  const hours = nyDate.getHours();
-  const minutes = nyDate.getMinutes();
+  const parts = Object.fromEntries(formatter.formatToParts(now).map(p => [p.type, p.value]));
+  const hours = parseInt(parts.hour, 10) % 24;
+  const minutes = parseInt(parts.minute, 10);
+  const weekday = parts.weekday; // 'Sun', 'Mon', 'Tue', etc.
+
+  const isWeekend = weekday === 'Sat' || weekday === 'Sun';
   const currentMinutesFromMidnight = hours * 60 + minutes;
 
   // Market hours: 9:30 AM (570 mins) to 4:00 PM (960 mins)
   const marketOpenMins = 9 * 60 + 30; // 9:30 AM
   const marketCloseMins = 16 * 60;     // 4:00 PM
 
-  const isWeekend = dayOfWeek === 0 || dayOfWeek === 6;
   const isWeekdayMarketHours =
     !isWeekend &&
     currentMinutesFromMidnight >= marketOpenMins &&
@@ -39,12 +50,21 @@ export function getMarketHoursStatus() {
     message = 'US pre-market. Early trading on BSC actively anticipating opening bell.';
   }
 
+  const nyTimeFormatted = now.toLocaleTimeString('en-US', {
+    timeZone: 'America/New_York',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true
+  });
+
   return {
     isOpen: isWeekdayMarketHours,
+    isClosed: !isWeekdayMarketHours,
     isWeekend,
     session,
     message,
-    nyTime: nyDate.toLocaleTimeString("en-US", { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true }),
+    nyTime: nyTimeFormatted,
     onChainActive: true // BSC never sleeps
   };
 }

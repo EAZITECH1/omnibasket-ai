@@ -39,13 +39,17 @@ export async function runAgentCycle(options = {}) {
     console.warn(`[AGENT] x402 Alpha fetch notice: ${err.message}`);
   }
 
-  // Step 2: Compute Portfolio Drift
-  const totalHoldingsValue = sampleHoldings.reduce((acc, h) => acc + h.valueUsd, 0);
-  const driftAnalysis = calculateDrift(sampleHoldings, basket.allocations, totalHoldingsValue);
+  // Step 2: Compute Portfolio Drift (with normalized tickers)
+  const normalizedHoldings = sampleHoldings.map(h => ({
+    ...h,
+    ticker: (h.ticker || '').replace(/on$/i, '').toUpperCase()
+  }));
+  const totalHoldingsValue = normalizedHoldings.reduce((acc, h) => acc + h.valueUsd, 0);
+  const driftAnalysis = calculateDrift(normalizedHoldings, basket.allocations, totalHoldingsValue);
   const maxDrift = Math.max(...driftAnalysis.map(d => Math.abs(d.driftPercent)));
   const driftExceeded = maxDrift >= 5.0;
 
-  console.log(`[AGENT] Drift Analysis: Max Drift = ${maxDrift}% (Threshold = 5.0%) -> Rebalance Needed: ${driftExceeded}`);
+  console.log(`[AGENT] Drift Analysis: Max Drift = ${maxDrift.toFixed(2)}% (Threshold = 5.0%) -> Rebalance Needed: ${driftExceeded}`);
 
   // Step 3: Check Allocation Validity and Rebalancing Plan
   const allocationPlan = generateAllocationPlan(depositAmount, basket.allocations);
@@ -106,16 +110,26 @@ export async function runAgentCycle(options = {}) {
       verificationNote: simulationReport.verificationNote
     } : null,
     recommendation: driftExceeded 
-      ? `Drift of ${maxDrift}% exceeds 5% threshold. Rebalancing order calibrated on BSC DEX aggregator.`
+      ? `Drift of ${maxDrift.toFixed(2)}% exceeds 5% threshold. Rebalancing order calibrated on BSC DEX aggregator.`
       : 'Holdings within balanced bands. Continued 24/7 sentinel monitoring active.'
   };
 
   return report;
 }
 
-// Support CLI direct invocation: node src/agent/autonomousWorker.js
+// Support CLI direct invocation: node src/agent/autonomousWorker.js [--daemon]
 if (process.argv[1] && process.argv[1].endsWith('autonomousWorker.js')) {
-  runAgentCycle()
-    .then(report => console.log('\n--- AUTONOMOUS AGENT REPORT ---\n', JSON.stringify(report, null, 2)))
-    .catch(err => console.error('Agent error:', err));
+  const isDaemon = process.argv.includes('--daemon') || process.env.AGENT_DAEMON === 'true';
+
+  if (isDaemon) {
+    console.log('[AGENT] Starting 24/7 autonomous daemon loop (checking every 30s)...');
+    runAgentCycle().catch(console.error);
+    setInterval(() => {
+      runAgentCycle().catch(console.error);
+    }, 30000);
+  } else {
+    runAgentCycle()
+      .then(report => console.log('\n--- AUTONOMOUS AGENT REPORT ---\n', JSON.stringify(report, null, 2)))
+      .catch(err => console.error('Agent error:', err));
+  }
 }

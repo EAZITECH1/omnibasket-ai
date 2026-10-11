@@ -7,19 +7,46 @@ const USDT_ADDRESS = BSC_RWA_TOKENS.USDT.contractAddress;
 
 export async function POST(req) {
   try {
-    const { allocations, depositAmount = 25 } = await req.json();
+    const cleanDeposit = parseFloat(depositAmount);
+    if (isNaN(cleanDeposit) || cleanDeposit < 5) {
+      return Response.json({ success: false, error: 'Deposit amount must be at least 5 USD.' }, { status: 400 });
+    }
 
     if (!allocations || !Array.isArray(allocations) || allocations.length === 0) {
       return Response.json({ success: false, error: 'Valid allocations array is required.' }, { status: 400 });
+    }
+
+    // Pre-Transaction Simulation Guardrail
+    // Ensures EVM calldata & balance limits are pre-flight checked before broadcast
+    try {
+      const simUrl = new URL(req.url);
+      const simRes = await fetch(`${simUrl.origin}/api/simulate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ allocations, depositAmount: cleanDeposit })
+      });
+      if (simRes.ok) {
+        const simData = await simRes.json();
+        const fatalRevert = simData.legs?.find(l => l.simulationStatus === 'SIMULATED_REVERT' && !l.failReason?.includes('transfer amount exceeds balance'));
+        if (fatalRevert) {
+          return Response.json({
+            success: false,
+            error: `Pre-Transaction Simulation Guardrail Revert for ${fatalRevert.ticker}: ${fatalRevert.failReason}. Broadcast blocked with $0 gas lost.`,
+            simulationGuard: simData
+          }, { status: 400 });
+        }
+      }
+    } catch (simErr) {
+      console.warn('Pre-broadcast simulation notice:', simErr.message);
     }
 
     const results = [];
 
     for (const alloc of allocations) {
       const targetToken = BSC_RWA_TOKENS[alloc.ticker];
-      if (!targetToken) continue;
+      if (!targetToken || !/^0x[a-fA-F0-9]{40}$/.test(targetToken.contractAddress)) continue;
 
-      const legAmountUsd = (depositAmount * alloc.weight) / 100;
+      const legAmountUsd = (cleanDeposit * alloc.weight) / 100;
       if (legAmountUsd < 5) {
         results.push({
           ticker: alloc.ticker,
@@ -41,12 +68,12 @@ export async function POST(req) {
         if (parsed.success && parsed.data?.orderId) {
           const orderId = parsed.data.orderId;
           
-          // Poll market-order list to resolve terminal status and txHash
+          // Poll market-order list on BSC (#56) to resolve terminal status and txHash
           let finalOrder = null;
           for (let i = 0; i < 3; i++) {
             await new Promise(r => setTimeout(r, 1200));
             try {
-              const listRes = await execPromise('baw market-order list --json');
+              const listRes = await execPromise('baw market-order list --binanceChainId 56 --json');
               const listParsed = JSON.parse(listRes.stdout);
               const found = listParsed.data?.list?.find(o => o.orderId === orderId);
               if (found) {

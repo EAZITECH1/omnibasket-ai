@@ -69,7 +69,7 @@ export async function POST(req) {
       const quoteData = await quoteRes.json();
 
       if (quoteData.code !== 0 || !quoteData.data?.[0]) {
-        // Provide calibrated simulation fallback for off-hours
+        // Transparently label calibrated off-hours estimate rather than asserting false EVM simulation
         const estUnitPrice = alloc.ticker === 'NVDA' ? 230.93 : alloc.ticker === 'MSFT' ? 537.40 : alloc.ticker === 'AAPL' ? 232.10 : alloc.ticker === 'USDY' ? 1.05 : 180.00;
         const estTokens = targetUsd / estUnitPrice;
         totalGasGwei += 250000;
@@ -81,15 +81,15 @@ export async function POST(req) {
           contractAddress: targetToken.contractAddress,
           weight: alloc.weight,
           targetUsd,
-          quoteId: `sim-${Date.now()}-${alloc.ticker}`,
-          vendor: 'LiquidMesh (24/7 Pool)',
+          quoteId: `est-${Date.now()}-${alloc.ticker}`,
+          vendor: 'LiquidMesh (24/7 Pool Estimate)',
           executionMode: 'SWAP',
           toAmountTokens: parseFloat(estTokens.toFixed(4)),
           router: '0xB44446b0c8E56988c34f7Ff73Ae904982b5FdDA5',
           calldataLength: 4890,
-          simulated: true,
-          simulationStatus: 'SUCCESS',
-          failReason: null,
+          simulated: false,
+          simulationStatus: 'ESTIMATED',
+          failReason: 'Aggregator quote route unavailable off-hours; estimated AMM parameters calculated.',
           balanceChanges: [],
           allowanceChanges: []
         });
@@ -177,7 +177,8 @@ export async function POST(req) {
       });
     }
 
-    const allSuccessful = legResults.every(l => l.simulationStatus === 'SUCCESS');
+    const allSuccessful = legResults.length > 0 && legResults.every(l => l.simulationStatus === 'SUCCESS');
+    const isEstimated = legResults.some(l => l.simulationStatus === 'ESTIMATED');
     const isBalanceRevert = legResults.some(l => l.failReason?.includes('transfer amount exceeds balance'));
 
     return Response.json({
@@ -194,6 +195,8 @@ export async function POST(req) {
         ? 'DEX routes & contract ABIs verified against BSC state. Dry-run detected zero USDT balance in test wallet.'
         : allSuccessful
         ? 'All legs simulated successfully on BSC state with zero reverts.'
+        : isEstimated
+        ? 'Off-hours estimated allocations (Direct AMM quote unavailable from aggregator).'
         : 'Simulation complete with partial warnings.',
       mevProtection: 'Active (Private RPC / BSC Fast Path)'
     });

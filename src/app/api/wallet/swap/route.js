@@ -66,6 +66,17 @@ export async function POST(req) {
       fromTokenQty = held.balance;
     }
 
+    const cleanQty = parseFloat(fromTokenQty);
+    if (isNaN(cleanQty) || cleanQty <= 0) {
+      return Response.json({ success: false, error: 'Invalid swap quantity.' }, { status: 400 });
+    }
+    fromTokenQty = cleanQty.toString();
+
+    const ADDR_REGEX = /^0x[a-fA-F0-9]{40}$/;
+    if (!ADDR_REGEX.test(fromToken.contractAddress) || !ADDR_REGEX.test(toToken.contractAddress)) {
+      return Response.json({ success: false, error: 'Invalid token contract address format.' }, { status: 400 });
+    }
+
     const isExitToUsdt = toToken.contractAddress.toLowerCase() === USDT_ADDRESS.toLowerCase();
     const isBuyFromUsdt = fromToken.contractAddress.toLowerCase() === USDT_ADDRESS.toLowerCase();
 
@@ -171,6 +182,15 @@ export async function POST(req) {
 
   } catch (error) {
     console.error('Swap router error:', error);
-    return Response.json({ success: false, error: error.message }, { status: 500 });
+    let errMsg = error.message;
+    if (error.stdout) {
+      try {
+        const parsedErr = JSON.parse(error.stdout);
+        if (parsedErr.error?.message) {
+          errMsg = parsedErr.error.message;
+        }
+      } catch (_) {}
+    }
+    return Response.json({ success: false, error: errMsg }, { status: 500 });
   }
 }
