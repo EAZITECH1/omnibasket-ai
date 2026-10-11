@@ -298,7 +298,7 @@ export async function authSignin(req) {
           fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
         }
         const { stdout } = await execFileAsync(bawBin, ['auth', 'signin', '--json'], {
-          timeout: 2500,
+          timeout: 5000,
           env: { ...process.env, BINANCE_BAW_DIR: sessionDir }
         });
         const parsed = JSON.parse(stdout);

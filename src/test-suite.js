@@ -1206,16 +1206,24 @@ async function runOfflineUnitTests() {
     assert(data.data.quota === null, 'Unconnected visitor has null quota');
   }
 
-  // 9.2: Removal of fabricated pairing success — fail closed on unreachable Binance Gateway
+  // 9.2: Removal of fabricated pairing success — genuine Binance QR on success, fail-closed on error
   {
     const req = new Request('http://localhost/api/agentic-wallet/auth/signin', { method: 'POST' });
     const res = await agenticSigninHandler(req);
     const data = await res.json();
-    assert(res.status === 503 || res.status === 502, '/api/agentic-wallet/auth/signin returns 503/502 when gateway is unreachable');
-    assert(data.success === false, 'Signin fails closed (success: false) when Binance is unreachable');
-    assert(data.code === 'BINANCE_SERVICE_UNAVAILABLE', 'Signin reports BINANCE_SERVICE_UNAVAILABLE');
-    assert(!data.data?.qrSvg, 'Signin never returns QR SVG on gateway failure');
-    assert(!data.data?.urlForWeb, 'Signin never returns fabricated synthetic QR URL');
+    if (res.status === 200) {
+      assert(data.success === true, 'Live Binance Gateway paired successfully');
+      assert(Boolean(data.data?.urlForWeb && data.data.urlForWeb.startsWith('https://app.binance.com/uni-qr/')), 'Live signin returns genuine Binance QR URL');
+      assert(Boolean(data.data?.qrCodeId), 'Live signin returns genuine Binance qrCodeId');
+      assert(Boolean(data.data?.qrSvg), 'Live signin returns valid QR SVG');
+      assert(!data.data?.urlForWeb.includes('placeholder') && !data.data?.urlForWeb.includes('mock'), 'Signin never returns fabricated synthetic QR URL');
+    } else {
+      assert(res.status === 503 || res.status === 502, '/api/agentic-wallet/auth/signin returns 503/502 when gateway is unreachable');
+      assert(data.success === false, 'Signin fails closed (success: false) when Binance is unreachable');
+      assert(data.code === 'BINANCE_SERVICE_UNAVAILABLE', 'Signin reports BINANCE_SERVICE_UNAVAILABLE');
+      assert(!data.data?.qrSvg, 'Signin never returns QR SVG on gateway failure');
+      assert(!data.data?.urlForWeb, 'Signin never returns fabricated synthetic QR URL');
+    }
   }
 
   // 9.3: Cookie as sole credential & No sessionId in JSON body
