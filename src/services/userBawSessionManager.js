@@ -12,7 +12,8 @@ import {
   saveSession, 
   loadSession, 
   deleteSession, 
-  rotateSession 
+  rotateSession,
+  validateStoreConfig
 } from './bawSessionStore.js';
 
 const execFileAsync = util.promisify(execFile);
@@ -34,30 +35,39 @@ export function validateCsrfOrigin(req) {
 
   const origin = req.headers?.get ? req.headers.get('origin') : req.headers?.origin;
   const host = req.headers?.get ? req.headers.get('host') : req.headers?.host;
+  const referer = req.headers?.get ? req.headers.get('referer') : req.headers?.referer;
+  const secFetchSite = req.headers?.get ? req.headers.get('sec-fetch-site') : req.headers?.['sec-fetch-site'];
 
-  if (!origin) {
-    // If no origin header is sent (e.g. programmatic test or same-site curl), verify referer if present
-    const referer = req.headers?.get ? req.headers.get('referer') : req.headers?.referer;
-    if (referer && host) {
-      try {
-        const refUrl = new URL(referer);
-        return refUrl.host === host;
-      } catch (_) {
-        return false;
-      }
-    }
-    return true; // Allow non-browser requests without origin/referer header
-  }
-
-  try {
-    const originUrl = new URL(origin);
-    if (host && originUrl.host !== host) {
-      return false;
-    }
-    return true;
-  } catch (_) {
+  if (secFetchSite === 'cross-site') {
     return false;
   }
+
+  if (origin) {
+    try {
+      const originUrl = new URL(origin);
+      if (host && originUrl.host !== host) {
+        return false;
+      }
+      return true;
+    } catch (_) {
+      return false; // Malformed origin is strictly rejected
+    }
+  }
+
+  if (referer) {
+    try {
+      const refUrl = new URL(referer);
+      if (host && refUrl.host !== host) {
+        return false;
+      }
+      return true;
+    } catch (_) {
+      return false; // Malformed referer is strictly rejected
+    }
+  }
+
+  // Allow non-browser requests without origin or referer header
+  return true;
 }
 
 /**
@@ -191,6 +201,17 @@ async function callBinanceBapi(endpoint, method = 'GET', body = null, agentSessi
  * FAILS CLOSED. NEVER returns a fabricated QR URL or fake success.
  */
 export async function authSignin(req) {
+  // Store configuration check
+  const storeConfig = validateStoreConfig();
+  if (!storeConfig.valid) {
+    return {
+      success: false,
+      status: 503,
+      code: 'STORE_CONFIGURATION_REQUIRED',
+      error: `Agentic Wallet pairing is unavailable: ${storeConfig.error}`
+    };
+  }
+
   // CSRF protection check
   if (!validateCsrfOrigin(req)) {
     return {
@@ -353,6 +374,17 @@ export async function authSignin(req) {
  * Strictly verifies status against the session identified by the HttpOnly cookie.
  */
 export async function checkPairingStatus(req) {
+  // Store configuration check
+  const storeConfig = validateStoreConfig();
+  if (!storeConfig.valid) {
+    return {
+      success: false,
+      status: 503,
+      code: 'STORE_CONFIGURATION_REQUIRED',
+      error: `Agentic Wallet is unavailable: ${storeConfig.error}`
+    };
+  }
+
   const sessionId = getSessionIdFromRequest(req);
   if (!sessionId) {
     return {
@@ -473,6 +505,17 @@ export async function checkPairingStatus(req) {
  * Rotates session ID upon verified confirmation.
  */
 export async function confirmAgentSignin(req, body = {}) {
+  // Store configuration check
+  const storeConfig = validateStoreConfig();
+  if (!storeConfig.valid) {
+    return {
+      success: false,
+      status: 503,
+      code: 'STORE_CONFIGURATION_REQUIRED',
+      error: `Agentic Wallet is unavailable: ${storeConfig.error}`
+    };
+  }
+
   // CSRF protection check
   if (!validateCsrfOrigin(req)) {
     return {
@@ -614,6 +657,17 @@ export async function confirmAgentSignin(req, body = {}) {
  * 4. Sign Out and Revoke Active Session
  */
 export async function authSignout(req) {
+  // Store configuration check
+  const storeConfig = validateStoreConfig();
+  if (!storeConfig.valid) {
+    return {
+      success: false,
+      status: 503,
+      code: 'STORE_CONFIGURATION_REQUIRED',
+      error: `Agentic Wallet is unavailable: ${storeConfig.error}`
+    };
+  }
+
   // CSRF protection check
   if (!validateCsrfOrigin(req)) {
     return {
@@ -641,6 +695,36 @@ export async function authSignout(req) {
  * 5. Query Calling User's Current Status (Cookie Authenticated)
  */
 export async function getUserStatus(req) {
+  const storeConfig = validateStoreConfig();
+  if (!storeConfig.valid) {
+    return {
+      success: true,
+      status: 200,
+      data: {
+        status: 'UNAVAILABLE',
+        connected: false,
+        available: false,
+        pairingAvailable: false,
+        tradingAvailable: false,
+        tradingStatus: 'UNAVAILABLE',
+        address: null,
+        binanceChainId: '56',
+        chainName: 'BNB Smart Chain (BSC)',
+        isKeylessMpc: true,
+        quota: null,
+        reason: storeConfig.reason,
+        message: `Agentic Wallet is unavailable in this deployment: ${storeConfig.error}`,
+        guardrails: {
+          dailyLimit: 50000.0,
+          quotaLeft: 50000.0,
+          quotaUsed: 0.0,
+          abnormalTxPolicy: 'AutoReject (App Guardrail)',
+          slippageTolerance: '0.5% (App Safeguard)'
+        }
+      }
+    };
+  }
+
   const sessionId = getSessionIdFromRequest(req);
   if (!sessionId) {
     return {
@@ -649,11 +733,16 @@ export async function getUserStatus(req) {
       data: {
         status: 'UNCONNECTED',
         connected: false,
+        available: true,
+        pairingAvailable: true,
+        tradingAvailable: false,
+        tradingStatus: 'UNPAIRED',
         address: null,
         binanceChainId: '56',
         chainName: 'BNB Smart Chain (BSC)',
         isKeylessMpc: true,
         quota: null,
+        message: 'Agentic Wallet pairing is available. Scan QR code to connect.',
         guardrails: {
           dailyLimit: 50000.0,
           quotaLeft: 50000.0,
@@ -673,11 +762,23 @@ export async function getUserStatus(req) {
       data: {
         status: 'UNCONNECTED',
         connected: false,
+        available: true,
+        pairingAvailable: true,
+        tradingAvailable: false,
+        tradingStatus: 'UNPAIRED',
         address: null,
         binanceChainId: '56',
         chainName: 'BNB Smart Chain (BSC)',
         isKeylessMpc: true,
-        quota: null
+        quota: null,
+        message: 'Agentic Wallet pairing is available. Scan QR code to connect.',
+        guardrails: {
+          dailyLimit: 50000.0,
+          quotaLeft: 50000.0,
+          quotaUsed: 0.0,
+          abnormalTxPolicy: 'AutoReject (App Guardrail)',
+          slippageTolerance: '0.5% (App Safeguard)'
+        }
       }
     };
   }
@@ -690,18 +791,32 @@ export async function getUserStatus(req) {
     success: true,
     status: 200,
     data: {
-      status: session.status,
+      status: isConnected ? 'CONNECTED' : (session.status || 'UNCONNECTED'),
       connected: isConnected,
+      available: true,
+      pairingAvailable: true,
+      tradingAvailable: false,
+      tradingStatus: isConnected ? 'TRADING_UNAVAILABLE' : 'UNPAIRED',
       address: isConnected ? session.walletAddress : null,
       binanceChainId: '56',
       chainName: 'BNB Smart Chain (BSC)',
       isKeylessMpc: true,
       lastActive: new Date(session.lastActive).toISOString(),
       quota: isConnected ? {
-        dailyLimit: session.dailyLimit,
-        quotaLeft: session.quotaLeft,
-        quotaUsed: session.quotaUsed
-      } : null
+        dailyLimit: session.dailyLimit || 50000.0,
+        quotaLeft: session.quotaLeft !== undefined ? session.quotaLeft : 50000.0,
+        quotaUsed: session.quotaUsed || 0.0
+      } : null,
+      message: isConnected
+        ? 'Agentic Wallet paired. Autonomous trade execution is unavailable in this deployment; use Extension Wallet for trading.'
+        : 'Agentic Wallet pairing in progress.',
+      guardrails: {
+        dailyLimit: session.dailyLimit || 50000.0,
+        quotaLeft: session.quotaLeft !== undefined ? session.quotaLeft : 50000.0,
+        quotaUsed: session.quotaUsed || 0.0,
+        abnormalTxPolicy: 'AutoReject (App Guardrail)',
+        slippageTolerance: '0.5% (App Safeguard)'
+      }
     }
   };
 }
@@ -796,6 +911,17 @@ export async function getBalance(req) {
  * 8. Execute Autonomous Basket Allocation via Binance Agentic Wallet under Guardrails
  */
 export async function executeBasketAutonomous(req, body = {}) {
+  // Store configuration check
+  const storeConfig = validateStoreConfig();
+  if (!storeConfig.valid) {
+    return {
+      success: false,
+      status: 503,
+      code: 'STORE_CONFIGURATION_REQUIRED',
+      error: `Agentic Wallet execution is unavailable: ${storeConfig.error}`
+    };
+  }
+
   // CSRF protection check
   if (!validateCsrfOrigin(req)) {
     return {
@@ -874,13 +1000,13 @@ export async function executeBasketAutonomous(req, body = {}) {
     };
   }
 
-  // Fail closed if CLI or API execution cannot genuinely broadcast with confirmed receipts
-  // If Binance per-user execution environment is not configured, report the exact blocker
+  // Fail closed: autonomous server-side trade execution is unconfigured/unavailable in this deployment.
+  // Fail closed with HTTP 503 AUTONOMOUS_TRADING_UNAVAILABLE.
   return {
     success: false,
     status: 503,
-    code: 'AUTONOMOUS_EXECUTION_BLOCKED',
-    error: 'Autonomous server-side trade submission requires the Binance Web3 Wallet Extension or a configured local Agentic Wallet signer daemon. Please switch to Extension Wallet mode to execute trades with your browser wallet.',
+    code: 'AUTONOMOUS_TRADING_UNAVAILABLE',
+    error: 'Autonomous server-side trade execution is unavailable in this deployment. Please switch to Extension Wallet mode to execute trades directly with your browser wallet.',
     walletAddress: session.walletAddress
   };
 }

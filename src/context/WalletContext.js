@@ -34,6 +34,10 @@ export function WalletProvider({ children }) {
   const [agenticSession, setAgenticSession] = useState({
     connected: false,
     status: 'UNCONNECTED',
+    available: true,
+    pairingAvailable: true,
+    tradingAvailable: false,
+    tradingStatus: 'UNPAIRED',
     address: null,
     quota: null
   });
@@ -105,8 +109,13 @@ export function WalletProvider({ children }) {
         setAgenticSession({
           connected: isConn,
           status: data.data.status || 'UNCONNECTED',
+          available: data.data.available !== false,
+          pairingAvailable: data.data.pairingAvailable !== false,
+          tradingAvailable: !!data.data.tradingAvailable,
+          tradingStatus: data.data.tradingStatus || (isConn ? 'TRADING_UNAVAILABLE' : 'UNPAIRED'),
           address: data.data.address || null,
-          quota: data.data.quota || null
+          quota: data.data.quota || null,
+          message: data.data.message || null
         });
         if (isConn) {
           setAgenticAddress(data.data.address);
@@ -117,9 +126,14 @@ export function WalletProvider({ children }) {
     } catch (err) {
       setAgenticSession({
         connected: false,
-        status: 'UNCONNECTED',
+        status: 'UNAVAILABLE',
+        available: false,
+        pairingAvailable: false,
+        tradingAvailable: false,
+        tradingStatus: 'UNAVAILABLE',
         address: null,
-        quota: null
+        quota: null,
+        message: 'Unable to reach Agentic Wallet service.'
       });
       setAgenticAddress(null);
     }

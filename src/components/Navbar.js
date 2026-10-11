@@ -18,6 +18,7 @@ export default function Navbar() {
     isBscMainnet,
     networkName,
     balances,
+    agenticSession,
     connect,
     switchNetwork,
     openModal
@@ -129,6 +130,11 @@ export default function Navbar() {
             >
               <span className="inline-block h-2 w-2 rounded-full bg-emerald-400"></span>
               <span>{formatAddress(address)}</span>
+              {walletMode === 'agentic' && (
+                <span className="text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/40 px-1.5 py-0.5 font-mono font-bold">
+                  PAIRED (NO TRADING)
+                </span>
+              )}
               <span className="hidden sm:inline text-bnb-yellow font-black">
                 (${balances.usdt})
               </span>
@@ -137,13 +143,24 @@ export default function Navbar() {
             <button
               onClick={connect}
               disabled={isConnecting}
-              className="border-2 border-foreground px-3 py-1.5 text-[11px] font-black font-mono uppercase tracking-widest bg-bnb-yellow text-black hover:bg-white transition-all shadow-[2px_2px_0px_0px_#000] disabled:opacity-50 cursor-pointer flex items-center gap-1.5"
+              className={`border-2 border-foreground px-3 py-1.5 text-[11px] font-black font-mono uppercase tracking-widest transition-all shadow-[2px_2px_0px_0px_#000] disabled:opacity-50 cursor-pointer flex items-center gap-1.5 ${
+                walletMode === 'agentic' && agenticSession?.available === false
+                  ? 'bg-red-950/40 text-red-400 border-red-500 hover:bg-red-500 hover:text-white'
+                  : 'bg-bnb-yellow text-black hover:bg-white'
+              }`}
             >
               {walletMode === 'agentic' ? (
-                <>
-                  <Zap className="w-3.5 h-3.5 fill-current text-red-400" />
-                  <span>AGENTIC (DISABLED)</span>
-                </>
+                agenticSession?.available === false ? (
+                  <>
+                    <AlertTriangle className="w-3.5 h-3.5 text-red-400" />
+                    <span>AGENTIC UNAVAILABLE</span>
+                  </>
+                ) : (
+                  <>
+                    <Zap className="w-3.5 h-3.5 fill-current" />
+                    <span>PAIR AGENTIC WALLET</span>
+                  </>
+                )
               ) : (
                 <>
                   <Wallet className="w-3.5 h-3.5" />

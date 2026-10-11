@@ -43,10 +43,17 @@ All integrated endpoints strictly follow the official BNB Chain Hackathon specif
 * **OpenRouter AI Integration**: Powers deep conversational portfolio rebalancing and strategy explanations.
 * **Graceful Local Fallback (`omnibasket-neuro`)**: If `OPENROUTER_API_KEY` is omitted, the platform seamlessly uses its built-in deterministic financial reasoning engine with zero downtime or degraded functionality.
 
-### 2. 🔐 Binance Web3 Wallet Extension (Primary Production Flow)
-* **True User-Owned Non-Custodial Architecture**: Public users connect their own **Binance Web3 Wallet** (or compatible EIP-1193 injected provider) directly in the browser.
-* **Zero Server-Side Keys Required**: Production and Railway deployments require **ZERO Binance API keys or secret keys** on the server.
-* **Pre-Broadcast Account & Chain Validation**: Immediately prior to dispatching `eth_sendTransaction`, the client re-verifies that the active wallet is strictly on **BNB Smart Chain Mainnet (Chain ID 56)** and that the signer matches the connected address.
+### 2. 🔐 Dual Wallet Architecture (Extension vs. Agentic MPC)
+* **Primary Production Flow: Binance Web3 Wallet Extension (Self-Custody)**:
+  - Public users connect their own **Binance Web3 Wallet** (or compatible EIP-1193 injected provider) directly in the browser.
+  - **Zero Server-Side Keys**: Production and Railway deployments require **ZERO Binance API keys or private keys** on the server.
+  - Multi-leg basket swaps and approvals are signed client-side with user confirmation prompts after fail-closed on-chain EVM preflight simulation.
+  - Immediately prior to dispatching `eth_sendTransaction`, the client re-verifies that the active wallet is strictly on **BNB Smart Chain Mainnet (Chain ID 56)**.
+* **Secondary Flow: Binance Agentic Wallet (Keyless MPC with Guardrails)**:
+  - Supports per-user QR code pairing with the mobile Binance App.
+  - Enforces session isolation via `HttpOnly` cookie-only credentials with automatic session rotation upon verified pairing.
+  - **Production Persistence Requirements**: Multi-instance and containerized deployments (such as Railway) require an attached persistent volume mounted at `BAW_SESSION_STORE_DIR` and a 32+ character `BAW_SESSION_SECRET`. If unconfigured, the app honestly fails closed and reports `AGENTIC UNAVAILABLE`.
+  - **Truthful Execution Capability**: Server-side autonomous trade submission without browser signing is marked `AUTONOMOUS_TRADING_UNAVAILABLE` (HTTP 503), directing users to Extension Wallet mode for verified on-chain execution.
 
 ### 3. 🛡️ Meaningful Minimum Output & 0.5% Hard Slippage Protection
 * **Zero Minimum Outputs Banned**: Executable calldata strictly forbids zero `amountOutMinWei`. Any attempt to construct a swap with zero or negative minimum output throws an unhandled execution error.

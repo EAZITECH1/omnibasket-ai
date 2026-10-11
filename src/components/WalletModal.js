@@ -263,7 +263,9 @@ export default function WalletModal() {
               {walletMode === 'agentic' ? (
                 <span className="text-[10px] bg-bnb-yellow text-black font-bold px-1.5 py-0.2">ACTIVE</span>
               ) : agenticSession.connected ? (
-                <span className="text-[10px] bg-emerald-400/20 text-emerald-300 border border-emerald-400 px-1.5 py-0.2 font-bold">PAIRED</span>
+                <span className="text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/40 px-1.5 py-0.2 font-bold">PAIRED (NO TRADING)</span>
+              ) : agenticSession.available === false ? (
+                <span className="text-[10px] bg-red-950/40 text-red-400 border border-red-500/40 px-1.5 py-0.2 font-bold">UNAVAILABLE</span>
               ) : (
                 <span className="text-[10px] bg-foreground/20 text-foreground border border-foreground/30 px-1.5 py-0.2 font-bold">MPC</span>
               )}
@@ -327,8 +329,8 @@ export default function WalletModal() {
                       Binance MPC v1.10.0
                     </span>
                   </div>
-                  <span className="text-[10px] bg-emerald-400/20 text-emerald-300 border border-emerald-400 px-2 py-0.5 font-bold">
-                    CONNECTED
+                  <span className="text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/40 px-2 py-0.5 font-bold font-mono">
+                    PAIRED (NO TRADING)
                   </span>
                 </div>
 
@@ -372,7 +374,15 @@ export default function WalletModal() {
                   </div>
                 </div>
 
-                {/* Guardrails Active Notice */}
+                {/* Execution Capability & Guardrails Notices */}
+                <div className="border border-amber-500/40 bg-amber-950/20 p-2.5 text-[11px] text-amber-300 flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                  <div>
+                    <strong className="block font-bold">Autonomous Trade Execution Unavailable</strong>
+                    <span>Server-side autonomous swap execution is unavailable in this deployment. Your Binance MPC address and balances are paired and tracked, but multi-leg basket trade execution requires browser signing via <strong>Extension Wallet</strong> mode.</span>
+                  </div>
+                </div>
+
                 <div className="border border-foreground/20 bg-background p-2.5 text-[11px] text-muted-foreground flex items-center gap-2">
                   <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
                   <span>App-level Guardrails Active: Maximum 0.5% slippage ceiling, AutoReject high risk, $50,000 daily spend limit on BSC Mainnet #56.</span>

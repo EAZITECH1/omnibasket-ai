@@ -14,6 +14,10 @@
  *    - If unreachable, reports infra/network unavailability without masking or mislabeling.
  */
 
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+import crypto from 'crypto';
 import { checkConfiguration } from './services/configCheck.js';
 import { isAgenticWalletEnabled, ensureBawSession } from './services/bawSession.js';
 import { 
@@ -1161,8 +1165,25 @@ async function runOfflineUnitTests() {
   const { POST: agenticConfirmHandler } = await import('./app/api/agentic-wallet/auth/confirm-agent/route.js');
   const { POST: agenticSignoutHandler } = await import('./app/api/agentic-wallet/auth/signout/route.js');
   const { POST: agenticExecuteHandler } = await import('./app/api/agentic-wallet/execute-basket/route.js');
-  const { BAW_COOKIE_NAME, buildSessionCookieHeader } = await import('./services/userBawSessionManager.js');
-  const { saveSession, loadSession, deleteSession, clearAllSessions } = await import('./services/bawSessionStore.js');
+  const { 
+    BAW_COOKIE_NAME, 
+    buildSessionCookieHeader,
+    validateCsrfOrigin,
+    authSignin,
+    checkPairingStatus,
+    confirmAgentSignin,
+    authSignout,
+    getUserStatus,
+    executeBasketAutonomous
+  } = await import('./services/userBawSessionManager.js');
+  const { 
+    saveSession, 
+    loadSession, 
+    deleteSession, 
+    clearAllSessions,
+    validateStoreConfig,
+    getMasterEncryptionKey
+  } = await import('./services/bawSessionStore.js');
 
   await clearAllSessions();
 
@@ -1470,9 +1491,9 @@ async function runOfflineUnitTests() {
     });
     const execRes = await agenticExecuteHandler(execReq);
     const execData = await execRes.json();
-    assert(execRes.status === 503 || execRes.status === 400, 'Execution without daemon fails closed with non-2xx');
+    assert(execRes.status === 503, 'Execution without daemon fails closed with HTTP 503');
     assert(execData.success === false, 'Execution reports success: false without real broadcast');
-    assert(execData.code === 'AUTONOMOUS_EXECUTION_BLOCKED' || execData.code === 'EXECUTION_ENVIRONMENT_UNAVAILABLE' || execData.code === 'UNSUPPORTED_NETWORK', 'Clear failure code returned');
+    assert(execData.code === 'AUTONOMOUS_TRADING_UNAVAILABLE', 'Clear failure code AUTONOMOUS_TRADING_UNAVAILABLE returned');
   }
 
   // 9.10: Production-Safe Durable Encrypted Store (AES-256-GCM)
@@ -1511,6 +1532,185 @@ async function runOfflineUnitTests() {
     assert(postSignoutData.data.connected === false, 'After signout, user reports connected: false');
     assert(postSignoutData.data.status === 'UNCONNECTED', 'After signout, user reports status: UNCONNECTED');
     assert(postSignoutData.data.address === null, 'After signout, address is null');
+  }
+
+  // --------------------------------------------------------------------------
+  // TEST GROUP 10: Production Store Persistence, Integrity & Fail-Closed Guardrails
+  // --------------------------------------------------------------------------
+  console.log('\nTest Group 10: Production Store Persistence, Integrity & Fail-Closed Guardrails');
+  {
+    // 10.1: Production environment config validation
+    const prodEnvMissingDir = { NODE_ENV: 'production', BAW_SESSION_SECRET: 'a'.repeat(32) };
+    const resMissingDir = validateStoreConfig(prodEnvMissingDir);
+    assert(resMissingDir.valid === false, 'Production rejects missing BAW_SESSION_STORE_DIR');
+    assert(resMissingDir.reason === 'STORE_DIR_MISSING', 'Fails with STORE_DIR_MISSING');
+
+    const prodEnvRelativeDir = { NODE_ENV: 'production', BAW_SESSION_STORE_DIR: './relative_sessions', BAW_SESSION_SECRET: 'a'.repeat(32) };
+    const resRelativeDir = validateStoreConfig(prodEnvRelativeDir);
+    assert(resRelativeDir.valid === false, 'Production rejects relative BAW_SESSION_STORE_DIR');
+    assert(resRelativeDir.reason === 'STORE_DIR_NOT_ABSOLUTE', 'Fails with STORE_DIR_NOT_ABSOLUTE');
+
+    const prodEnvCheckoutDir = { NODE_ENV: 'production', BAW_SESSION_STORE_DIR: path.join(process.cwd(), '.baw_sessions'), BAW_SESSION_SECRET: 'a'.repeat(32) };
+    const resCheckoutDir = validateStoreConfig(prodEnvCheckoutDir);
+    assert(resCheckoutDir.valid === false, 'Production rejects store directory inside application checkout');
+    assert(resCheckoutDir.reason === 'STORE_DIR_INSIDE_APP_CHECKOUT', 'Fails with STORE_DIR_INSIDE_APP_CHECKOUT');
+
+    const prodEnvShortSecret = { NODE_ENV: 'production', BAW_SESSION_STORE_DIR: '/data/baw_sessions', BAW_SESSION_SECRET: 'short_key' };
+    const resShortSecret = validateStoreConfig(prodEnvShortSecret);
+    assert(resShortSecret.valid === false, 'Production rejects secret shorter than 32 characters');
+    assert(resShortSecret.reason === 'SESSION_SECRET_INVALID', 'Fails with SESSION_SECRET_INVALID');
+
+    const prodEnvPlaceholderSecret = { NODE_ENV: 'production', BAW_SESSION_STORE_DIR: '/data/baw_sessions', BAW_SESSION_SECRET: 'placeholder_key_at_least_32_characters_long' };
+    const resPlaceholderSecret = validateStoreConfig(prodEnvPlaceholderSecret);
+    assert(resPlaceholderSecret.valid === false, 'Production rejects placeholder secret');
+    assert(resPlaceholderSecret.reason === 'SESSION_SECRET_PLACEHOLDER', 'Fails with SESSION_SECRET_PLACEHOLDER');
+
+    const prodEnvValid = { NODE_ENV: 'production', BAW_SESSION_STORE_DIR: '/data/baw_sessions', BAW_SESSION_SECRET: 'a_very_secure_high_entropy_secret_1234567890!' };
+    const resValid = validateStoreConfig(prodEnvValid);
+    assert(resValid.valid === true, 'Production accepts valid absolute external dir and high-entropy secret');
+
+    // 10.2: Fail-closed behavior on unconfigured production store
+    const prevEnv = process.env.NODE_ENV;
+    const prevDir = process.env.BAW_SESSION_STORE_DIR;
+    const prevSecret = process.env.BAW_SESSION_SECRET;
+    try {
+      process.env.NODE_ENV = 'production';
+      delete process.env.BAW_SESSION_STORE_DIR;
+      delete process.env.BAW_SESSION_SECRET;
+
+      // Status endpoint reports UNAVAILABLE
+      const unavailStatusRes = await agenticStatusHandler(new Request('http://localhost/api/agentic-wallet/status'));
+      const unavailStatusData = await unavailStatusRes.json();
+      assert(unavailStatusData.data.status === 'UNAVAILABLE', 'Unconfigured production reports status UNAVAILABLE');
+      assert(unavailStatusData.data.available === false, 'Unconfigured production reports available: false');
+      assert(unavailStatusData.data.tradingAvailable === false, 'Unconfigured production reports tradingAvailable: false');
+      assert(unavailStatusData.data.tradingStatus === 'UNAVAILABLE', 'Unconfigured production reports tradingStatus: UNAVAILABLE');
+      assert(unavailStatusData.data.connected === false, 'Unconfigured production never reports connected');
+
+      // Signin endpoint fails closed with 503 STORE_CONFIGURATION_REQUIRED
+      const unavailSigninRes = await authSignin(new Request('http://localhost/api/agentic-wallet/auth/signin', { method: 'POST' }));
+      assert(unavailSigninRes.status === 503, 'Signin fails closed with HTTP 503 when store is unconfigured');
+      assert(unavailSigninRes.code === 'STORE_CONFIGURATION_REQUIRED', 'Signin returns STORE_CONFIGURATION_REQUIRED');
+
+      // Check pairing status fails closed
+      const unavailPairRes = await checkPairingStatus(new Request('http://localhost/api/agentic-wallet/auth/status'));
+      assert(unavailPairRes.status === 503, 'Pair status fails closed with HTTP 503 when store is unconfigured');
+
+      // Confirm signin fails closed
+      const unavailConfirmRes = await confirmAgentSignin(new Request('http://localhost/api/agentic-wallet/auth/confirm-agent', { method: 'POST' }));
+      assert(unavailConfirmRes.status === 503, 'Confirm signin fails closed with HTTP 503 when store is unconfigured');
+
+      // Signout fails closed
+      const unavailSignoutRes = await authSignout(new Request('http://localhost/api/agentic-wallet/auth/signout', { method: 'POST' }));
+      assert(unavailSignoutRes.status === 503, 'Signout fails closed with HTTP 503 when store is unconfigured');
+
+      // Execute fails closed
+      const unavailExecRes = await executeBasketAutonomous(new Request('http://localhost/api/agentic-wallet/execute-basket', { method: 'POST' }));
+      assert(unavailExecRes.status === 503, 'Execute fails closed with HTTP 503 when store is unconfigured');
+    } finally {
+      process.env.NODE_ENV = prevEnv;
+      if (prevDir !== undefined) process.env.BAW_SESSION_STORE_DIR = prevDir;
+      if (prevSecret !== undefined) process.env.BAW_SESSION_SECRET = prevSecret;
+    }
+
+    // 10.3: Multi-Instance Session Persistence across Restarts
+    const testStoreDir = path.join(os.tmpdir(), `omnibasket_test_store_${crypto.randomUUID()}`);
+    const testSecret = 'super_secure_test_encryption_secret_minimum_32_bytes_long_abc123';
+    fs.mkdirSync(testStoreDir, { recursive: true, mode: 0o700 });
+
+    try {
+      const persistentSessionId = crypto.randomUUID();
+      const mockSessionPayload = {
+        sessionId: persistentSessionId,
+        status: 'CONNECTED',
+        walletAddress: '0x1111111111111111111111111111111111111111',
+        dailyLimit: 50000.0,
+        quotaLeft: 42000.0,
+        quotaUsed: 8000.0,
+        createdAt: Date.now()
+      };
+
+      // Simulated Instance 1 writes session to external volume
+      const saveOk = await saveSession(persistentSessionId, mockSessionPayload, testStoreDir, testSecret);
+      assert(saveOk === true, 'Instance 1 writes encrypted session payload to persistent volume');
+
+      // Simulated Instance 2 reads session from external volume
+      const instance2Loaded = await loadSession(persistentSessionId, testStoreDir, testSecret);
+      assert(instance2Loaded !== null, 'Instance 2 reads persistent session');
+      assert(instance2Loaded.status === 'CONNECTED', 'Instance 2 verifies CONNECTED status');
+      assert(instance2Loaded.walletAddress === mockSessionPayload.walletAddress, 'Instance 2 verifies wallet address');
+      assert(instance2Loaded.quotaLeft === 42000.0, 'Instance 2 verifies remaining quota');
+
+      // 10.4: Wrong encryption key rejection
+      const wrongSecret = 'another_secret_that_is_also_at_least_32_characters_long_xyz789';
+      const wrongKeyLoaded = await loadSession(persistentSessionId, testStoreDir, wrongSecret);
+      assert(wrongKeyLoaded === null, 'Load session with wrong key fails safely and returns null');
+
+      // 10.5: Tampered ciphertext detection & cleanup
+      const tamperSessionId = crypto.randomUUID();
+      await saveSession(tamperSessionId, { status: 'CONNECTED', walletAddress: '0x2222222222222222222222222222222222222222' }, testStoreDir, testSecret);
+      const filenameHash = crypto.createHash('sha256').update(tamperSessionId).digest('hex');
+      const tamperFilePath = path.join(testStoreDir, `${filenameHash}.enc`);
+      assert(fs.existsSync(tamperFilePath), 'Session file exists before tamper');
+      // Corrupt payload
+      fs.writeFileSync(tamperFilePath, JSON.stringify({ v: 1, iv: 'bad', tag: 'bad', data: 'bad' }), 'utf8');
+      const tamperedLoaded = await loadSession(tamperSessionId, testStoreDir, testSecret);
+      assert(tamperedLoaded === null, 'Tampered session file rejected');
+      assert(!fs.existsSync(tamperFilePath), 'Corrupt/tampered session file automatically unlinked');
+
+      // 10.6: Expired session detection & cleanup
+      const expiredSessionId = crypto.randomUUID();
+      await saveSession(expiredSessionId, { status: 'CONNECTED', expiresAt: Date.now() - 5000 }, testStoreDir, testSecret);
+      const expHash = crypto.createHash('sha256').update(expiredSessionId).digest('hex');
+      const expFilePath = path.join(testStoreDir, `${expHash}.enc`);
+      assert(fs.existsSync(expFilePath), 'Expired session file exists before load');
+      const expLoaded = await loadSession(expiredSessionId, testStoreDir, testSecret);
+      assert(expLoaded === null, 'Expired session returns null');
+      assert(!fs.existsSync(expFilePath), 'Expired session file automatically unlinked');
+
+      // 10.7: Concurrent atomic writes
+      const concurrentSessionId = crypto.randomUUID();
+      const concurrentWrites = Array.from({ length: 10 }, (_, i) => 
+        saveSession(concurrentSessionId, { status: 'CONNECTED', iteration: i, timestamp: Date.now() }, testStoreDir, testSecret)
+      );
+      const concurrentResults = await Promise.all(concurrentWrites);
+      assert(concurrentResults.every(r => r === true), 'All 10 concurrent writes completed atomically');
+      const finalLoaded = await loadSession(concurrentSessionId, testStoreDir, testSecret);
+      assert(finalLoaded !== null && finalLoaded.status === 'CONNECTED', 'Concurrent writes produced valid uncorrupted session');
+      // Ensure no dangling .tmp files
+      const remainingFiles = fs.readdirSync(testStoreDir);
+      assert(remainingFiles.every(f => !f.endsWith('.tmp')), 'No dangling .tmp temporary files remain after concurrent atomic writes');
+
+      // 10.8: CSRF & Origin hardening
+      const crossSiteReq = new Request('http://localhost/api/agentic-wallet/auth/signin', {
+        method: 'POST',
+        headers: { 'sec-fetch-site': 'cross-site' }
+      });
+      assert(validateCsrfOrigin(crossSiteReq) === false, 'CSRF validator strictly rejects sec-fetch-site: cross-site');
+
+      const malformedOriginReq = new Request('http://localhost/api/agentic-wallet/auth/signin', {
+        method: 'POST',
+        headers: { 'origin': 'not-a-valid-url' }
+      });
+      assert(validateCsrfOrigin(malformedOriginReq) === false, 'CSRF validator strictly rejects malformed Origin header');
+
+      const malformedRefererReq = new Request('http://localhost/api/agentic-wallet/auth/signin', {
+        method: 'POST',
+        headers: { 'referer': 'http:///invalid referer/' }
+      });
+      assert(validateCsrfOrigin(malformedRefererReq) === false, 'CSRF validator strictly rejects malformed Referer header');
+
+      const mismatchedOriginReq = new Request('http://localhost/api/agentic-wallet/auth/signin', {
+        method: 'POST',
+        headers: { 'origin': 'https://evil-attacker.com', 'host': 'omnibasket.ai' }
+      });
+      assert(validateCsrfOrigin(mismatchedOriginReq) === false, 'CSRF validator strictly rejects mismatched origin');
+    } finally {
+      // Cleanup temp store directory
+      try {
+        fs.rmSync(testStoreDir, { recursive: true, force: true });
+      } catch (_) {}
+    }
   }
 }
 
