@@ -1,38 +1,27 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Wallet, ExternalLink } from 'lucide-react';
+import { Wallet, Zap, AlertTriangle, ShieldCheck } from 'lucide-react';
+import { useWallet } from '../context/WalletContext.js';
+import { formatAddress } from '../lib/wallet/provider.js';
 
-export default function Navbar({ connectedAddress = '0x03A48c451B8cbE0bed6172eeaaE84a9B20505283' }) {
+export default function Navbar() {
   const pathname = usePathname();
-  const [balanceUsdt, setBalanceUsdt] = useState('...');
-  const [balanceBnb, setBalanceBnb] = useState('0.00');
-
-  const fetchLiveBalance = () => {
-    fetch('/api/wallet/balance')
-      .then(res => res.json())
-      .then(data => {
-        if (data.success) {
-          const usdt = data.tokens?.find(t => t.symbol === 'USDT');
-          if (usdt) setBalanceUsdt(usdt.balance.toFixed(2));
-          const bnb = data.tokens?.find(t => t.symbol === 'BNB');
-          if (bnb) setBalanceBnb(bnb.balance.toFixed(4));
-        }
-      })
-      .catch(() => {});
-  };
-
-  useEffect(() => {
-    fetchLiveBalance();
-    const interval = setInterval(fetchLiveBalance, 6000);
-    window.addEventListener('omnibasket-balance-refresh', fetchLiveBalance);
-    return () => {
-      clearInterval(interval);
-      window.removeEventListener('omnibasket-balance-refresh', fetchLiveBalance);
-    };
-  }, []);
+  const {
+    walletMode,
+    setWalletMode,
+    isConnected,
+    isConnecting,
+    address,
+    isBscMainnet,
+    networkName,
+    balances,
+    connect,
+    switchNetwork,
+    openModal
+  } = useWallet();
 
   const navLinks = [
     { href: '/strategy-agent', label: 'STRATEGY AGENT' },
@@ -43,7 +32,7 @@ export default function Navbar({ connectedAddress = '0x03A48c451B8cbE0bed6172eea
   ];
 
   return (
-    <header className="sticky top-0 z-50 border-b-2 border-foreground bg-background/95 backdrop-blur-sm">
+    <header className="sticky top-0 z-40 border-b-2 border-foreground bg-background/95 backdrop-blur-sm">
       <div className="flex w-full items-center justify-between px-3 py-3 sm:px-5 lg:px-6">
         
         {/* Brand Logo */}
@@ -78,31 +67,91 @@ export default function Navbar({ connectedAddress = '0x03A48c451B8cbE0bed6172eea
           })}
         </nav>
 
-        {/* Right Status Badges */}
+        {/* Right Status Badges & Dual Wallet Controls */}
         <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-          {/* Network Selector Tabs */}
-          <div role="tablist" className="hidden border-2 border-foreground text-[10px] font-bold uppercase tracking-widest md:flex">
-            <span className="flex items-center gap-1.5 px-2.5 py-1.5 bg-foreground text-background">
-              <span className="inline-block h-1.5 w-1.5 bg-bnb-yellow"></span>
-              BSC Mainnet
-            </span>
-            <span className="flex items-center gap-1.5 px-2.5 py-1.5 border-l-2 border-foreground text-muted-foreground bg-card">
-              Ondo / bStocks
-            </span>
+
+          {/* Mode Toggle Switcher Pill */}
+          <div className="flex border-2 border-foreground p-0.5 bg-card text-[10px] font-mono font-bold uppercase tracking-wider">
+            <button
+              onClick={() => setWalletMode('agentic')}
+              className={`px-2 py-1 flex items-center gap-1 transition-all cursor-pointer ${
+                walletMode === 'agentic'
+                  ? 'bg-foreground text-background shadow-[1px_1px_0px_0px_#f0b90b]'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+              title="Autonomous keyless agentic wallet mode"
+            >
+              <Zap className="w-3 h-3 text-bnb-yellow fill-current" />
+              <span className="hidden md:inline">Agentic</span>
+            </button>
+            <button
+              onClick={() => setWalletMode('extension')}
+              className={`px-2 py-1 flex items-center gap-1 transition-all cursor-pointer ${
+                walletMode === 'extension'
+                  ? 'bg-foreground text-background shadow-[1px_1px_0px_0px_#f0b90b]'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+              title="Manual browser extension mode"
+            >
+              <Wallet className="w-3 h-3" />
+              <span className="hidden md:inline">Extension</span>
+            </button>
           </div>
 
-          {/* Connected Agentic Wallet Badge */}
-          <a
-            href={`https://bscscan.com/address/${connectedAddress}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            title="View wallet on BscScan"
-            className="border-2 border-foreground px-2.5 py-1.5 text-[11px] font-bold font-mono uppercase tracking-widest bg-card hover:bg-foreground hover:text-background transition-colors flex items-center gap-2 shadow-[2px_2px_0px_0px_#e6e6e6]"
-          >
-            <span className="inline-block h-2 w-2 rounded-full bg-emerald-400 animate-pulse"></span>
-            <span>{connectedAddress.slice(0, 6)}...{connectedAddress.slice(-4)}</span>
-            <span className="hidden sm:inline text-bnb-yellow font-black">(${balanceUsdt})</span>
-          </a>
+          {/* Network Indicator Badge */}
+          {isBscMainnet ? (
+            <div 
+              onClick={openModal}
+              role="button"
+              className="hidden sm:flex items-center gap-1.5 border-2 border-foreground px-2.5 py-1.5 text-[10px] font-bold font-mono uppercase tracking-widest bg-card hover:bg-muted/30 transition-colors cursor-pointer"
+              title="Network: BNB Smart Chain Mainnet (Chain ID 56)"
+            >
+              <span className="inline-block h-2 w-2 rounded-full bg-emerald-400 animate-pulse"></span>
+              <span>BSC 56</span>
+            </div>
+          ) : (
+            <button
+              onClick={switchNetwork}
+              className="flex items-center gap-1.5 border-2 border-red-500 px-2.5 py-1.5 text-[10px] font-bold font-mono uppercase tracking-widest bg-red-950/40 text-red-400 hover:bg-red-500 hover:text-white transition-colors cursor-pointer"
+              title="Click to switch to BSC Mainnet"
+            >
+              <AlertTriangle className="w-3 h-3 text-red-400" />
+              <span>Switch to BSC 56</span>
+            </button>
+          )}
+
+          {/* Connected Wallet Button */}
+          {isConnected ? (
+            <button
+              onClick={openModal}
+              title="Open Wallet Control Hub"
+              className="border-2 border-foreground px-2.5 py-1.5 text-[11px] font-bold font-mono uppercase tracking-widest bg-card hover:bg-foreground hover:text-background transition-colors flex items-center gap-2 shadow-[2px_2px_0px_0px_#e6e6e6] cursor-pointer"
+            >
+              <span className="inline-block h-2 w-2 rounded-full bg-emerald-400"></span>
+              <span>{formatAddress(address)}</span>
+              <span className="hidden sm:inline text-bnb-yellow font-black">
+                (${balances.usdt})
+              </span>
+            </button>
+          ) : (
+            <button
+              onClick={connect}
+              disabled={isConnecting}
+              className="border-2 border-foreground px-3 py-1.5 text-[11px] font-black font-mono uppercase tracking-widest bg-bnb-yellow text-black hover:bg-white transition-all shadow-[2px_2px_0px_0px_#000] disabled:opacity-50 cursor-pointer flex items-center gap-1.5"
+            >
+              {walletMode === 'agentic' ? (
+                <>
+                  <Zap className="w-3.5 h-3.5 fill-current" />
+                  <span>{isConnecting ? 'CONNECTING...' : 'CONNECT AGENTIC'}</span>
+                </>
+              ) : (
+                <>
+                  <Wallet className="w-3.5 h-3.5" />
+                  <span>{isConnecting ? 'CONNECTING...' : 'CONNECT EXTENSION'}</span>
+                </>
+              )}
+            </button>
+          )}
         </div>
       </div>
 

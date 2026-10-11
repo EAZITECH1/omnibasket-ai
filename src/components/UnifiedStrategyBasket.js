@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Navbar from './Navbar';
 import FormattedMessageContent from './FormattedMessageContent';
+import { useWallet } from '../context/WalletContext.js';
 import { BSC_RWA_TOKENS, PRESET_BASKETS } from '../services/tokens';
 import { generateAllocationPlan } from '../services/rebalancer';
 import { getMarketHoursStatus } from '../services/marketHours';
@@ -67,6 +68,16 @@ const DEFAULT_MESSAGE = {
 };
 
 export default function UnifiedStrategyBasket() {
+  const { 
+    walletMode, 
+    isConnected, 
+    address, 
+    isBscMainnet, 
+    openModal, 
+    switchNetwork, 
+    balances 
+  } = useWallet();
+
   // Strategy Agent States
   const [selectedModel, setSelectedModel] = useState('omnibasket-neuro');
   const [customApiKey, setCustomApiKey] = useState('');
@@ -438,6 +449,19 @@ export default function UnifiedStrategyBasket() {
   // Execute Swap Action from Chat
   const handleExecuteSwapAction = async (action, actionMsgIdx = null) => {
     if (!action) return;
+
+    if (!isConnected) {
+      openModal();
+      alert('Please connect your wallet (Agentic or Extension) before executing trades.');
+      return;
+    }
+
+    if (!isBscMainnet) {
+      switchNetwork();
+      alert('Please switch network to BNB Smart Chain Mainnet (Chain ID 56) to execute trades.');
+      return;
+    }
+
     setExecutingSwap(true);
     setActiveActionIdx(actionMsgIdx);
 
@@ -717,7 +741,23 @@ export default function UnifiedStrategyBasket() {
 
   // Execute Basket Allocation
   const handleExecuteBasket = async () => {
-    if (!confirm(`Broadcast multi-leg allocation of $${depositAmount} USDT on BNB Smart Chain via Binance Agentic Wallet?`)) {
+    if (!isConnected) {
+      openModal();
+      alert('Please connect your wallet (Agentic or Extension) before executing basket allocations.');
+      return;
+    }
+
+    if (!isBscMainnet) {
+      switchNetwork();
+      alert('Please switch network to BNB Smart Chain Mainnet (Chain ID 56) to execute basket allocations.');
+      return;
+    }
+
+    const confirmMsg = walletMode === 'agentic'
+      ? `Broadcast multi-leg allocation of $${depositAmount} USDT on BNB Smart Chain via Binance Agentic Wallet (Autonomous Keyless MPC)?`
+      : `Broadcast multi-leg allocation of $${depositAmount} USDT on BNB Smart Chain via Extension Wallet (${address})?`;
+
+    if (!confirm(confirmMsg)) {
       return;
     }
 
@@ -746,8 +786,8 @@ export default function UnifiedStrategyBasket() {
           ...prev,
           {
             role: 'assistant',
-            content: `✅ **Multi-Leg Allocation FINISHED on BSC!**\n\n• **Strategy**: **${selectedBasket.name}**\n• **Capital Allocated**: **$${depositAmount} USDT**\n• ${data.summary || 'All swap legs executed via Binance Agentic Wallet.'}`,
-            modelUsed: 'Binance Agentic Wallet ⚡'
+            content: `✅ **Multi-Leg Allocation FINISHED on BSC!**\n\n• **Strategy**: **${selectedBasket.name}**\n• **Capital Allocated**: **$${depositAmount} USDT**\n• ${data.summary || 'All swap legs executed on BSC.'}`,
+            modelUsed: walletMode === 'agentic' ? 'Binance Agentic Wallet ⚡' : 'Binance Web3 Wallet Extension 🟡'
           }
         ]);
       }
@@ -800,11 +840,16 @@ export default function UnifiedStrategyBasket() {
               )}
 
               {/* Live Wallet Balance Pill */}
-              <div className="border-2 border-foreground bg-card px-3 py-1.5 text-xs font-mono flex items-center gap-2 shadow-[1px_1px_0px_0px_#fff]">
+              <div 
+                onClick={openModal}
+                role="button"
+                className="border-2 border-foreground bg-card px-3 py-1.5 text-xs font-mono flex items-center gap-2 shadow-[1px_1px_0px_0px_#fff] cursor-pointer hover:bg-muted/30 transition-colors"
+                title="Manage Wallet (Agentic or Extension)"
+              >
                 <span className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse"></span>
-                <span className="font-bold text-muted-foreground uppercase">Live Bal:</span>
-                <span className="text-bnb-yellow font-black">${liveBalance.usdt} USDT</span>
-                <span className="text-[10px] text-muted-foreground hidden sm:inline">({liveBalance.bnb} BNB)</span>
+                <span className="font-bold text-muted-foreground uppercase">{walletMode === 'agentic' ? 'baw:' : 'ext:'}</span>
+                <span className="text-bnb-yellow font-black">${balances.usdt} USDT</span>
+                <span className="text-[10px] text-muted-foreground hidden sm:inline">({balances.bnb} BNB)</span>
               </div>
 
               {/* Market Clock */}
@@ -1168,7 +1213,7 @@ export default function UnifiedStrategyBasket() {
                 {/* Subtitle / Wallet Balance Snippet */}
                 <div className="flex items-center justify-between text-[11px] font-mono text-muted-foreground bg-background p-2 border border-foreground/30">
                   <span>Connected Balance:</span>
-                  <span className="text-bnb-yellow font-bold">${liveBalance.usdt} USDT</span>
+                  <span className="text-bnb-yellow font-bold">${balances.usdt} USDT</span>
                 </div>
 
                 {/* Live Watchlist Token List */}
@@ -1474,14 +1519,32 @@ export default function UnifiedStrategyBasket() {
                 <span>{simulating ? 'Simulating on BSC...' : 'Simulate (Dry-Run)'}</span>
               </button>
 
-              <button 
-                onClick={handleExecuteBasket}
-                disabled={executingBasket}
-                className="border-2 border-foreground bg-bnb-yellow px-6 py-3 text-xs font-black uppercase tracking-widest text-black hover:bg-white transition-all shadow-[var(--shadow-box-sm)] disabled:opacity-50 cursor-pointer flex items-center gap-2"
-              >
-                <Zap className="w-3.5 h-3.5 fill-current" />
-                <span>{executingBasket ? 'Executing via baw...' : 'Execute on BSC'}</span>
-              </button>
+              {!isConnected ? (
+                <button 
+                  onClick={openModal}
+                  className="border-2 border-foreground bg-bnb-yellow px-6 py-3 text-xs font-black uppercase tracking-widest text-black hover:bg-white transition-all shadow-[var(--shadow-box-sm)] cursor-pointer flex items-center gap-2"
+                >
+                  <Wallet className="w-3.5 h-3.5" />
+                  <span>Connect Wallet to Execute</span>
+                </button>
+              ) : !isBscMainnet ? (
+                <button 
+                  onClick={switchNetwork}
+                  className="border-2 border-red-500 bg-red-600 px-6 py-3 text-xs font-black uppercase tracking-widest text-white hover:bg-red-700 transition-all shadow-[var(--shadow-box-sm)] cursor-pointer flex items-center gap-2"
+                >
+                  <AlertTriangle className="w-3.5 h-3.5" />
+                  <span>Switch to BSC 56</span>
+                </button>
+              ) : (
+                <button 
+                  onClick={handleExecuteBasket}
+                  disabled={executingBasket}
+                  className="border-2 border-foreground bg-bnb-yellow px-6 py-3 text-xs font-black uppercase tracking-widest text-black hover:bg-white transition-all shadow-[var(--shadow-box-sm)] disabled:opacity-50 cursor-pointer flex items-center gap-2"
+                >
+                  {walletMode === 'agentic' ? <Zap className="w-3.5 h-3.5 fill-current" /> : <Wallet className="w-3.5 h-3.5" />}
+                  <span>{executingBasket ? (walletMode === 'agentic' ? 'Executing via baw...' : 'Broadcasting on BSC...') : (walletMode === 'agentic' ? '1-Click Execute (baw)' : 'Execute on BSC')}</span>
+                </button>
+              )}
             </div>
           </div>
 
@@ -1494,7 +1557,7 @@ export default function UnifiedStrategyBasket() {
                   <span>Transaction Simulation Verified · 0 Reverts</span>
                 </div>
                 <span className="text-[10px] font-mono bg-emerald-400/20 text-emerald-300 border border-emerald-400 px-2 py-0.5 font-bold">
-                  BSC Chain ID 56
+                  {walletMode === 'agentic' ? 'Agentic Mode · BSC #56' : 'Extension Mode · BSC #56'}
                 </span>
               </div>
               <p className="text-xs font-mono text-emerald-300/80 mb-3">

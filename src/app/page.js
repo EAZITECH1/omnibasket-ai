@@ -3,11 +3,12 @@
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import Navbar from '../components/Navbar';
+import { useWallet } from '../context/WalletContext';
 import { getMarketHoursStatus } from '../services/marketHours';
 
 export default function Home() {
   const [marketStatus, setMarketStatus] = useState(getMarketHoursStatus());
-  const connectedAddress = '0x03A48c451B8cbE0bed6172eeaaE84a9B20505283';
+  const { address, isConnected, isBscMainnet, openModal } = useWallet();
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -19,7 +20,7 @@ export default function Home() {
   return (
     <div className="flex min-h-screen flex-col bg-background text-foreground">
       {/* Universal Sticky Navbar */}
-      <Navbar connectedAddress={connectedAddress} />
+      <Navbar />
 
       {/* Main Container */}
       <main className="relative mx-auto w-full max-w-6xl px-4 py-10 sm:py-14 flex-1">
@@ -132,8 +133,8 @@ export default function Home() {
           <span>
             BNB Hack: Tokenized Stocks Edition · Built with <a className="underline text-foreground" href="https://web3.binance.com" target="_blank" rel="noreferrer">Binance Web3 Wallet</a>
           </span>
-          <span className="flex-1 text-center sm:text-left">
-            Connected: <span className="font-mono text-foreground font-bold">{connectedAddress.slice(0, 6)}...{connectedAddress.slice(-4)}</span> (BSC Mainnet)
+          <span className="flex-1 text-center sm:text-left cursor-pointer" onClick={openModal}>
+            Connected: <span className="font-mono text-foreground font-bold">{isConnected && address ? `${address.slice(0, 6)}...${address.slice(-4)}` : 'Not Connected'}</span> {isBscMainnet ? '(BSC Mainnet 56)' : '(Wrong Network)'}
           </span>
           <a 
             href="https://github.com/binance/binance-skills-hub" 
