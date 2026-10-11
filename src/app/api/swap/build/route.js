@@ -90,11 +90,17 @@ export async function POST(req) {
     }
 
     // 7. Check ERC20 allowance on BSC
-    const currentAllowance = await checkTokenAllowance({
-      tokenAddress: fromToken.contractAddress,
-      ownerAddress: userWalletAddress,
-      spenderAddress: BSC_PANCAKE_ROUTER
-    });
+    let currentAllowance = 0n;
+    try {
+      currentAllowance = await checkTokenAllowance({
+        tokenAddress: fromToken.contractAddress,
+        ownerAddress: userWalletAddress,
+        spenderAddress: BSC_PANCAKE_ROUTER
+      });
+    } catch (err) {
+      console.warn('Allowance check warning:', err.message);
+      currentAllowance = 0n;
+    }
 
     const needsApproval = currentAllowance < amountInWei;
     let approveTx = null;

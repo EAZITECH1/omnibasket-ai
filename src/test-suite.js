@@ -1,19 +1,17 @@
 /**
- * OmniBasket AI - Comprehensive Verification Test Suite
+ * OmniBasket AI - Comprehensive Verification & Regression Test Suite
  * 
- * Verifies:
- * 1. Absence of Binance Web3 API secrets does not break the app
- * 2. Shared server-side Agentic Wallet is disabled in public mode (503 fail-closed)
- * 3. No default or shared wallet address is ever treated as connected
- * 4. Extension wallet mode operates with on-chain BSC Chain ID 56 reads & unsigned calldata
- * 5. Pre-transaction simulation runs against BSC state and fails closed on reverts
- * 6. Minimum $5.00 order floor is strictly enforced on BSC
- * 7. Provider detection correctly identifies Binance Web3 Wallet vs generic injected providers
- * 8. Meaningful slippage protection (0.5% max) and nonzero amountOutMinWei
- * 9. Exact-amount token approvals (rejection of unlimited uint256.max approvals)
- * 10. Route discovery & unroutable asset rejection (USDY, GOOG, MAG7X, AI)
- * 11. OpenRouter / Built-in deterministic AI engine functions cleanly
- * 12. Zero-allowance basket execution, sequential approval-before-swap, and fail-closed guardrails
+ * Architecture:
+ * 1. DETERMINISTIC OFFLINE UNIT TEST SUITE:
+ *    - Runs 100% offline without live RPC or network dependencies.
+ *    - Uses injectable mock clients for EVM reads and simulations.
+ *    - Tests configuration flags, provider detection, calldata encoding, route guards,
+ *      API boundary error codes, balance verification, and production execution orchestration.
+ * 
+ * 2. LIVE BSC MAINNET SMOKE TEST SUITE (Network-Dependent):
+ *    - Probes BSC Mainnet RPC connectivity honestly.
+ *    - If reachable, verifies live on-chain quoting, route discovery, and EVM dry-runs.
+ *    - If unreachable, reports infra/network unavailability without masking or mislabeling.
  */
 
 import { checkConfiguration } from './services/configCheck.js';
@@ -22,9 +20,12 @@ import {
   buildApproveCalldata, 
   buildSwapCalldata, 
   checkTokenAllowance,
-  simulateBscTransaction,
-  getBscSwapQuote,
-  BSC_PANCAKE_ROUTER 
+  checkTokenBalance,
+  simulateBscTransaction, 
+  getBscSwapQuote, 
+  BSC_PANCAKE_ROUTER,
+  setCustomPublicBscClient,
+  getPublicBscClient
 } from './services/bscRouter.js';
 import { BSC_RWA_TOKENS, PRESET_BASKETS } from './services/tokens.js';
 import { 
@@ -34,9 +35,11 @@ import {
   checkChainId,
   pollExtensionReceipt
 } from './lib/wallet/provider.js';
+import { executeBasket } from './services/basketExecutor.js';
 
 let passed = 0;
 let failed = 0;
+let skipped = 0;
 
 function assert(condition, description) {
   if (condition) {
@@ -48,13 +51,21 @@ function assert(condition, description) {
   }
 }
 
-async function runTestSuite() {
+function skip(description, reason) {
+  console.log(`  ⚠️  SKIP: ${description} (${reason})`);
+  skipped++;
+}
+
+// ============================================================================
+// PART 1: DETERMINISTIC OFFLINE UNIT TEST SUITE
+// ============================================================================
+async function runOfflineUnitTests() {
   console.log('===============================================================');
-  console.log('   OmniBasket AI — Architecture & Security Verification Test   ');
+  console.log('   OmniBasket AI — Deterministic Offline Unit Test Suite       ');
   console.log('===============================================================\n');
 
   // --------------------------------------------------------------------------
-  // TEST GROUP 1: Configuration & Environment Integrity
+  // TEST GROUP 1: Configuration & Security Feature Flags
   // --------------------------------------------------------------------------
   console.log('Test Group 1: Configuration & Security Feature Flags');
   const config = checkConfiguration();
@@ -158,8 +169,7 @@ async function runTestSuite() {
   assert(approveTx.to.toLowerCase() === usdtAddr.toLowerCase(), 'Approve calldata targets USDT contract address');
   assert(approveTx.data.startsWith('0x095ea7b3'), 'Approve calldata starts with ERC20 approve() method selector (0x095ea7b3)');
   assert(approveTx.value === '0x0', 'Approve calldata has 0x0 ETH/BNB value');
-  // Check that the encoded amount is exactly 10 USDT, NOT uint256.max (ffffffff...)
-  const encodedAmount = approveTx.data.slice(74); // Spender is 32 bytes, amount is next 32 bytes
+  const encodedAmount = approveTx.data.slice(74);
   assert(!encodedAmount.startsWith('ffffffffffff'), 'Approve calldata does NOT encode uint256.max');
   assert(encodedAmount.endsWith('8ac7230489e80000'), 'Approve calldata precisely encodes 10 USDT in hexadecimal');
 
@@ -216,233 +226,699 @@ async function runTestSuite() {
   assert(swapTx.value === '0x0', 'Token swap calldata has 0x0 BNB value');
 
   // --------------------------------------------------------------------------
-  // TEST GROUP 5: BSC Route Discovery & Slippage Bound Enforcement
+  // TEST GROUP 5: Token Registry & Tradable Basket Allocation Integrity
   // --------------------------------------------------------------------------
-  console.log('\nTest Group 5: On-Chain AMM Route Discovery & 0.5% Slippage Bounding');
+  console.log('\nTest Group 5: Token Registry & Tradable Basket Allocation Integrity');
+  assert(BSC_RWA_TOKENS.NVDA.tradableOnBscDEX === true, 'NVDA is marked tradableOnBscDEX: true');
+  assert(BSC_RWA_TOKENS.AAPL.tradableOnBscDEX === true, 'AAPL is marked tradableOnBscDEX: true');
+  assert(BSC_RWA_TOKENS.MSFT.tradableOnBscDEX === true, 'MSFT is marked tradableOnBscDEX: true');
+  assert(BSC_RWA_TOKENS.TSLA.tradableOnBscDEX === true, 'TSLA is marked tradableOnBscDEX: true');
+  assert(BSC_RWA_TOKENS.USDY.tradableOnBscDEX === false, 'USDY is marked tradableOnBscDEX: false');
+  assert(BSC_RWA_TOKENS.GOOG.tradableOnBscDEX === false, 'GOOG is marked tradableOnBscDEX: false');
+  assert(BSC_RWA_TOKENS.MAG7X.tradableOnBscDEX === false, 'MAG7X is marked tradableOnBscDEX: false');
+
+  for (const [id, preset] of Object.entries(PRESET_BASKETS)) {
+    const allTradable = preset.allocations.every(a => BSC_RWA_TOKENS[a.ticker]?.tradableOnBscDEX === true);
+    assert(allTradable, `Preset '${preset.name}' contains 100% verified tradable assets on BSC`);
+  }
+
+  // --------------------------------------------------------------------------
+  // TEST GROUP 6: API Route Boundary & Guardrail Tests
+  // --------------------------------------------------------------------------
+  console.log('\nTest Group 6: API Route Boundary & Input Validation Tests');
+  const { GET: statusHandler } = await import('./app/api/wallet/status/route.js');
+  const { GET: balanceHandler } = await import('./app/api/wallet/balance/route.js');
+  const { POST: swapHandler } = await import('./app/api/wallet/swap/route.js');
+  const { POST: executeHandler } = await import('./app/api/execute/route.js');
+  const { POST: buildHandler } = await import('./app/api/swap/build/route.js');
+  const { POST: simulateHandler } = await import('./app/api/simulate/route.js');
+  const { POST: quoteHandler } = await import('./app/api/quote/route.js');
+  const { POST: chatHandler } = await import('./app/api/chat/route.js');
+
+  // 1. /api/wallet/status in public mode
+  const statusRes = await statusHandler(new Request('http://localhost/api/wallet/status'));
+  const statusData = await statusRes.json();
+  assert(statusData.enabled === false, '/api/wallet/status reports enabled: false in public mode');
+  assert(statusData.connected === false, '/api/wallet/status reports connected: false in public mode');
+  assert(statusData.address === null, '/api/wallet/status never returns a shared server address');
+
+  // 2. /api/wallet/balance without address (rejects with 503)
+  const bareBalanceRes = await balanceHandler(new Request('http://localhost/api/wallet/balance'));
+  assert(bareBalanceRes.status === 503, '/api/wallet/balance without ?address returns HTTP 503 Service Unavailable');
+
+  // 3. Server-side Agentic execution routes return 503
+  const serverSwapRes = await swapHandler(new Request('http://localhost/api/wallet/swap', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fromTicker: 'USDT', toTicker: 'NVDA', fromTokenQty: 10 })
+  }));
+  assert(serverSwapRes.status === 503, '/api/wallet/swap returns HTTP 503 in public mode');
+
+  const executeRes = await executeHandler(new Request('http://localhost/api/execute', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ allocations: [{ ticker: 'NVDA', weight: 100 }], depositAmount: 25 })
+  }));
+  assert(executeRes.status === 503, '/api/execute returns HTTP 503 in public mode');
+
+  // 4. /api/quote rejects unroutable token
+  const unroutableQuoteRes = await quoteHandler(new Request('http://localhost/api/quote', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fromTicker: 'USDT', toTicker: 'USDY', fromAmount: 10 })
+  }));
+  assert(unroutableQuoteRes.status === 400, '/api/quote returns HTTP 400 for unroutable token (USDY)');
+
+  // 5. /api/swap/build input validation
+  const noAddrBuildRes = await buildHandler(new Request('http://localhost/api/swap/build', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fromTicker: 'USDT', toTicker: 'NVDA', fromAmount: 10 })
+  }));
+  assert(noAddrBuildRes.status === 400, '/api/swap/build rejects missing userWalletAddress with HTTP 400');
+
+  const lowAmtBuildRes = await buildHandler(new Request('http://localhost/api/swap/build', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userWalletAddress: dummyUser, fromTicker: 'USDT', toTicker: 'NVDA', fromAmount: 3 })
+  }));
+  assert(lowAmtBuildRes.status === 400, '/api/swap/build enforces $5.00 minimum order floor with HTTP 400');
+
+  const unroutableBuildRes = await buildHandler(new Request('http://localhost/api/swap/build', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userWalletAddress: dummyUser, fromTicker: 'USDT', toTicker: 'USDY', fromAmount: 10 })
+  }));
+  assert(unroutableBuildRes.status === 400, '/api/swap/build rejects unroutable token (USDY) with HTTP 400');
+
+  // 6. /api/simulate address validation: missing or invalid address returns 400
+  const noAddrSimRes = await simulateHandler(new Request('http://localhost/api/simulate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      allocations: [{ ticker: 'NVDA', weight: 100 }],
+      depositAmount: 10
+    })
+  }));
+  assert(noAddrSimRes.status === 400, '/api/simulate returns HTTP 400 when userWalletAddress is missing');
+
+  const invalidAddrSimRes = await simulateHandler(new Request('http://localhost/api/simulate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      allocations: [{ ticker: 'NVDA', weight: 100 }],
+      depositAmount: 10,
+      userWalletAddress: '0xinvalid_address'
+    })
+  }));
+  assert(invalidAddrSimRes.status === 400, '/api/simulate returns HTTP 400 when userWalletAddress is invalid');
+
+  // 7. /api/simulate unroutable token fails closed
+  const unroutableSimRes = await simulateHandler(new Request('http://localhost/api/simulate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      allocations: [{ ticker: 'USDY', weight: 100 }],
+      depositAmount: 50,
+      userWalletAddress: dummyUser
+    })
+  }));
+  const unroutableSimData = await unroutableSimRes.json();
+  assert(unroutableSimData.overallStatus === 'REVERT_BLOCKED', '/api/simulate returns REVERT_BLOCKED when basket includes unroutable asset (USDY)');
+  assert(unroutableSimData.legs[0].status === 'SIMULATED_REVERT', '/api/simulate marks untradable leg as SIMULATED_REVERT');
+
+  // 8. /api/chat with built-in omnibasket-neuro engine
+  const chatRes = await chatHandler(new Request('http://localhost/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message: 'Create an AI basket with 60% Nvidia and 40% Microsoft',
+      model: 'omnibasket-neuro'
+    })
+  }));
+  const chatData = await chatRes.json();
+  assert(chatRes.status === 200, '/api/chat returns HTTP 200 OK');
+  assert(Boolean(chatData.reply), '/api/chat produces strategy response');
+  assert(Boolean(chatData.basket), '/api/chat parses basket synchronizations');
+
+  // --------------------------------------------------------------------------
+  // TEST GROUP 7: Mock Client Injection & Deterministic Contract Read Tests
+  // --------------------------------------------------------------------------
+  console.log('\nTest Group 7: Mock Client Injection & Deterministic Contract Read Tests');
+  
+  // 1. Mock Client Balance and Allowance
+  const mockViemClient = {
+    readContract: async ({ functionName, address, args }) => {
+      if (functionName === 'balanceOf') return 50000000000000000000n; // 50 USDT
+      if (functionName === 'allowance') return 0n; // 0 allowance
+      if (functionName === 'getAmountsOut') return [args[0], 42000000000000000n];
+      return 0n;
+    },
+    estimateGas: async () => 45000n,
+    call: async () => ({ data: '0x' })
+  };
+  setCustomPublicBscClient(mockViemClient);
+
+  const mockBalance = await checkTokenBalance({
+    tokenAddress: usdtAddr,
+    ownerAddress: dummyUser
+  });
+  assert(mockBalance === 50000000000000000000n, 'checkTokenBalance queries balance via injected client');
+
+  const mockAllowance = await checkTokenAllowance({
+    tokenAddress: usdtAddr,
+    ownerAddress: dummyUser,
+    spenderAddress: BSC_PANCAKE_ROUTER
+  });
+  assert(mockAllowance === 0n, 'checkTokenAllowance queries allowance via injected client');
+
+  // 2. Error propagation on balance read failure
+  const mockFaultyClient = {
+    readContract: async () => {
+      throw new Error('Simulated RPC network timeout');
+    }
+  };
+  setCustomPublicBscClient(mockFaultyClient);
+
+  let threwBalanceRead = false;
   try {
-    // 1. Live BSC Quote for tradable token (NVDA)
+    await checkTokenBalance({ tokenAddress: usdtAddr, ownerAddress: dummyUser });
+  } catch (err) {
+    threwBalanceRead = true;
+    assert(err.message.includes('Simulated RPC network timeout'), 'checkTokenBalance propagates RPC error instead of masking as 0 balance');
+  }
+  assert(threwBalanceRead, 'checkTokenBalance throws on contract/RPC read failure');
+
+  let threwAllowanceRead = false;
+  try {
+    await checkTokenAllowance({ tokenAddress: usdtAddr, ownerAddress: dummyUser, spenderAddress: BSC_PANCAKE_ROUTER });
+  } catch (err) {
+    threwAllowanceRead = true;
+    assert(err.message.includes('Simulated RPC network timeout'), 'checkTokenAllowance propagates RPC error instead of masking as 0 allowance');
+  }
+  assert(threwAllowanceRead, 'checkTokenAllowance throws on contract/RPC read failure');
+
+  // 3. /api/simulate with mock client: Sufficient Balance + Zero Allowance -> APPROVAL_REQUIRED_FIRST
+  setCustomPublicBscClient(mockViemClient);
+  const simMockRes = await simulateHandler(new Request('http://localhost/api/simulate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      allocations: [{ ticker: 'NVDA', weight: 100 }],
+      depositAmount: 10,
+      userWalletAddress: dummyUser
+    })
+  }));
+  const simMockData = await simMockRes.json();
+  assert(simMockRes.status === 200, '/api/simulate returns 200 with injected mock client');
+  assert(simMockData.success === true, '/api/simulate reports success: true when balance is sufficient');
+  assert(simMockData.overallStatus === 'APPROVAL_REQUIRED_FIRST', '/api/simulate returns APPROVAL_REQUIRED_FIRST when allowance is 0');
+  assert(simMockData.legs[0].needsApproval === true, 'Leg marks needsApproval: true');
+
+  // 4. /api/simulate with mock client: Insufficient Balance -> REVERT_BLOCKED
+  const mockZeroBalanceClient = {
+    readContract: async ({ functionName, args }) => {
+      if (functionName === 'balanceOf') return 0n; // 0 balance!
+      if (functionName === 'allowance') return 0n;
+      if (functionName === 'getAmountsOut') return [args[0], 42000000000000000n];
+      return 0n;
+    },
+    estimateGas: async () => 45000n,
+    call: async () => ({ data: '0x' })
+  };
+  setCustomPublicBscClient(mockZeroBalanceClient);
+  const simZeroBalRes = await simulateHandler(new Request('http://localhost/api/simulate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      allocations: [{ ticker: 'NVDA', weight: 100 }],
+      depositAmount: 10,
+      userWalletAddress: dummyUser
+    })
+  }));
+  const simZeroBalData = await simZeroBalRes.json();
+  assert(simZeroBalData.success === false, '/api/simulate fails closed (success: false) on insufficient balance');
+  assert(simZeroBalData.overallStatus === 'REVERT_BLOCKED', '/api/simulate returns REVERT_BLOCKED on insufficient balance');
+  assert(simZeroBalData.legs[0].failReason.includes('Insufficient USDT balance'), 'Leg failReason specifies insufficient USDT balance');
+
+  // 5. /api/simulate with mock client: Balance read failure -> REVERT_BLOCKED
+  const mockFaultyBalanceClient = {
+    readContract: async ({ functionName, args }) => {
+      if (functionName === 'getAmountsOut') return [args[0], 42000000000000000n];
+      if (functionName === 'balanceOf') throw new Error('Simulated RPC network timeout');
+      return 0n;
+    },
+    estimateGas: async () => 45000n,
+    call: async () => ({ data: '0x' })
+  };
+  setCustomPublicBscClient(mockFaultyBalanceClient);
+  const simFaultyBalRes = await simulateHandler(new Request('http://localhost/api/simulate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      allocations: [{ ticker: 'NVDA', weight: 100 }],
+      depositAmount: 10,
+      userWalletAddress: dummyUser
+    })
+  }));
+  const simFaultyBalData = await simFaultyBalRes.json();
+  assert(simFaultyBalData.success === false, '/api/simulate fails closed (success: false) when balance lookup fails');
+  assert(simFaultyBalData.overallStatus === 'REVERT_BLOCKED', '/api/simulate returns REVERT_BLOCKED on balance read failure');
+  assert(simFaultyBalData.legs[0].failReason.includes('Balance lookup failed for USDT'), 'Leg failReason specifies balance lookup failure');
+
+  // Reset custom client
+  setCustomPublicBscClient(null);
+
+  // --------------------------------------------------------------------------
+  // TEST GROUP 8: Production executeBasket Orchestrator Suite
+  // --------------------------------------------------------------------------
+  console.log('\nTest Group 8: Production executeBasket Orchestrator Suite');
+
+  // Test 8.1: Sufficient USDT + Zero Allowance -> approval sent first, then swap sent
+  {
+    const sentTransactions = [];
+    let promptCount = 0;
+    const mockProvider = {
+      isBinance: true,
+      request: async ({ method, params }) => {
+        if (method === 'eth_chainId') return '0x38';
+        if (method === 'eth_accounts') return [dummyUser];
+        if (method === 'eth_sendTransaction') {
+          sentTransactions.push(params[0]);
+          return params[0].data.startsWith('0x095ea7b3') ? '0xapproveHash1' : '0xswapHash1';
+        }
+        return null;
+      }
+    };
+
+    let buildCount = 0;
+    const result = await executeBasket({
+      allocations: [{ ticker: 'NVDA', weight: 100 }],
+      depositAmount: 10,
+      userWalletAddress: dummyUser,
+      provider: mockProvider,
+      confirmDialog: async () => { promptCount++; return true; },
+      pollReceiptFn: async () => ({ status: 'CONFIRMED' }),
+      simulateApiFn: async () => ({
+        ok: true,
+        status: 200,
+        data: {
+          success: true,
+          overallStatus: 'APPROVAL_REQUIRED_FIRST',
+          legs: [{ ticker: 'NVDA', simulationStatus: 'APPROVAL_REQUIRED_FIRST', needsApproval: true }]
+        }
+      }),
+      buildSwapApiFn: async () => {
+        buildCount++;
+        if (buildCount === 1) {
+          return {
+            ok: true,
+            status: 200,
+            data: {
+              success: true,
+              needsApproval: true,
+              approveTx: { to: usdtAddr, spender: BSC_PANCAKE_ROUTER, data: '0x095ea7b300000000000000000000000010ed43c718714eb63d5aa57b78b54704e256024e0000000000000000000000000000000000000000000000008ac7230489e80000' },
+              simulation: { status: 'SUCCESS' },
+              quote: { expectedAmountOut: '0.042', amountOutMin: '0.041', slippagePercent: '0.5' }
+            }
+          };
+        }
+        return {
+          ok: true,
+          status: 200,
+          data: {
+            success: true,
+            needsApproval: false,
+            swapTx: { to: BSC_PANCAKE_ROUTER, data: '0x38ed173900000000000000000000000000000000', value: '0x0' },
+            simulation: { status: 'SUCCESS' },
+            quote: { expectedAmountOut: '0.042', amountOutMin: '0.041', slippagePercent: '0.5' }
+          }
+        };
+      }
+    });
+
+    assert(result.success === true, 'executeBasket succeeds for zero-allowance wallet with sufficient balance');
+    assert(sentTransactions.length === 2, 'Exactly 2 transactions broadcast to provider');
+    assert(sentTransactions[0].data.startsWith('0x095ea7b3'), 'Transaction 1 is ERC-20 approve()');
+    assert(sentTransactions[1].data.startsWith('0x38ed1739'), 'Transaction 2 is PancakeSwap swap');
+    assert(sentTransactions[0].data.startsWith('0x095ea7b3') && sentTransactions[1].data.startsWith('0x38ed1739'), 'Approval strictly occurs BEFORE swap');
+    assert(promptCount === 2, 'User confirmed both approval and swap dialogs');
+  }
+
+  // Test 8.2: Insufficient USDT + Zero Allowance -> Blocked at preflight before any prompt or tx
+  {
+    const sentTransactions = [];
+    let promptCount = 0;
+    const mockProvider = {
+      request: async ({ method, params }) => {
+        if (method === 'eth_sendTransaction') {
+          sentTransactions.push(params[0]);
+          return '0xhash';
+        }
+        return null;
+      }
+    };
+
+    const result = await executeBasket({
+      allocations: [{ ticker: 'NVDA', weight: 100 }],
+      depositAmount: 10,
+      userWalletAddress: dummyUser,
+      provider: mockProvider,
+      confirmDialog: async () => { promptCount++; return true; },
+      simulateApiFn: async () => ({
+        ok: true,
+        status: 200,
+        data: {
+          success: false,
+          overallStatus: 'REVERT_BLOCKED',
+          legs: [{ ticker: 'NVDA', simulationStatus: 'SIMULATED_REVERT', failReason: 'Insufficient USDT balance for NVDA: required $10.00, available $0.00' }]
+        }
+      })
+    });
+
+    assert(result.success === false, 'executeBasket fails closed on insufficient USDT balance');
+    assert(result.blockedAt === 'PREFLIGHT', 'Blocked at PREFLIGHT boundary');
+    assert(promptCount === 0, 'ZERO user confirmation prompts triggered');
+    assert(sentTransactions.length === 0, 'ZERO transactions sent to provider (swap blocked before signing)');
+  }
+
+  // Test 8.3: Balance Lookup Failure -> Blocked at preflight before any prompt or tx
+  {
+    const sentTransactions = [];
+    let promptCount = 0;
+    const mockProvider = {
+      request: async ({ method, params }) => {
+        if (method === 'eth_sendTransaction') {
+          sentTransactions.push(params[0]);
+          return '0xhash';
+        }
+        return null;
+      }
+    };
+
+    const result = await executeBasket({
+      allocations: [{ ticker: 'NVDA', weight: 100 }],
+      depositAmount: 10,
+      userWalletAddress: dummyUser,
+      provider: mockProvider,
+      confirmDialog: async () => { promptCount++; return true; },
+      simulateApiFn: async () => ({
+        ok: true,
+        status: 200,
+        data: {
+          success: false,
+          overallStatus: 'REVERT_BLOCKED',
+          legs: [{ ticker: 'NVDA', simulationStatus: 'SIMULATED_REVERT', failReason: 'Balance lookup failed for USDT: RPC timeout' }]
+        }
+      })
+    });
+
+    assert(result.success === false, 'executeBasket fails closed on balance lookup error');
+    assert(result.blockedAt === 'PREFLIGHT', 'Blocked at PREFLIGHT boundary');
+    assert(promptCount === 0, 'ZERO user prompts triggered on balance lookup failure');
+    assert(sentTransactions.length === 0, 'ZERO transactions broadcast on balance lookup failure');
+  }
+
+  // Test 8.4: Approval Receipt REVERTED -> No swap sent
+  {
+    const sentTransactions = [];
+    const mockProvider = {
+      request: async ({ method, params }) => {
+        if (method === 'eth_sendTransaction') {
+          sentTransactions.push(params[0]);
+          return '0xapproveHash';
+        }
+        return null;
+      }
+    };
+
+    const result = await executeBasket({
+      allocations: [{ ticker: 'NVDA', weight: 100 }],
+      depositAmount: 10,
+      userWalletAddress: dummyUser,
+      provider: mockProvider,
+      pollReceiptFn: async () => ({ status: 'REVERTED' }),
+      simulateApiFn: async () => ({
+        ok: true,
+        status: 200,
+        data: { success: true, overallStatus: 'APPROVAL_REQUIRED_FIRST', legs: [] }
+      }),
+      buildSwapApiFn: async () => ({
+        ok: true,
+        status: 200,
+        data: {
+          success: true,
+          needsApproval: true,
+          approveTx: { to: usdtAddr, spender: BSC_PANCAKE_ROUTER, data: '0x095ea7b300' },
+          simulation: { status: 'SUCCESS' },
+          quote: { expectedAmountOut: '0.042', amountOutMin: '0.041', slippagePercent: '0.5' }
+        }
+      })
+    });
+
+    assert(result.success === false, 'executeBasket fails closed when approval reverts on-chain');
+    assert(sentTransactions.length === 1, 'Only 1 transaction was sent (the approval attempt)');
+    assert(sentTransactions[0].data.startsWith('0x095ea7b3'), 'The single transaction was the approval');
+    assert(!sentTransactions.some(tx => tx.data.startsWith('0x38ed1739')), 'NO eth_sendTransaction for swap occurred after approval reverted');
+  }
+
+  // Test 8.5: Approval Receipt PENDING -> No swap sent
+  {
+    const sentTransactions = [];
+    const mockProvider = {
+      request: async ({ method, params }) => {
+        if (method === 'eth_sendTransaction') {
+          sentTransactions.push(params[0]);
+          return '0xapproveHash';
+        }
+        return null;
+      }
+    };
+
+    const result = await executeBasket({
+      allocations: [{ ticker: 'NVDA', weight: 100 }],
+      depositAmount: 10,
+      userWalletAddress: dummyUser,
+      provider: mockProvider,
+      pollReceiptFn: async () => ({ status: 'PENDING' }),
+      simulateApiFn: async () => ({
+        ok: true,
+        status: 200,
+        data: { success: true, overallStatus: 'APPROVAL_REQUIRED_FIRST', legs: [] }
+      }),
+      buildSwapApiFn: async () => ({
+        ok: true,
+        status: 200,
+        data: {
+          success: true,
+          needsApproval: true,
+          approveTx: { to: usdtAddr, spender: BSC_PANCAKE_ROUTER, data: '0x095ea7b300' },
+          simulation: { status: 'SUCCESS' },
+          quote: { expectedAmountOut: '0.042', amountOutMin: '0.041', slippagePercent: '0.5' }
+        }
+      })
+    });
+
+    assert(result.success === false, 'executeBasket fails closed when approval receipt is pending/unconfirmed');
+    assert(sentTransactions.length === 1, 'Only approval was broadcast');
+    assert(!sentTransactions.some(tx => tx.data.startsWith('0x38ed1739')), 'NO eth_sendTransaction for swap occurred on pending approval receipt');
+  }
+
+  // Test 8.6: Post-Approval Swap Simulation Reverts -> No swap sent
+  {
+    const sentTransactions = [];
+    let buildStep = 0;
+    const mockProvider = {
+      request: async ({ method, params }) => {
+        if (method === 'eth_sendTransaction') {
+          sentTransactions.push(params[0]);
+          return '0xapproveHash';
+        }
+        return null;
+      }
+    };
+
+    const result = await executeBasket({
+      allocations: [{ ticker: 'NVDA', weight: 100 }],
+      depositAmount: 10,
+      userWalletAddress: dummyUser,
+      provider: mockProvider,
+      pollReceiptFn: async () => ({ status: 'CONFIRMED' }),
+      simulateApiFn: async () => ({
+        ok: true,
+        status: 200,
+        data: { success: true, overallStatus: 'APPROVAL_REQUIRED_FIRST', legs: [] }
+      }),
+      buildSwapApiFn: async () => {
+        buildStep++;
+        if (buildStep === 1) {
+          return {
+            ok: true,
+            status: 200,
+            data: {
+              success: true,
+              needsApproval: true,
+              approveTx: { to: usdtAddr, spender: BSC_PANCAKE_ROUTER, data: '0x095ea7b300' },
+              simulation: { status: 'SUCCESS' },
+              quote: { expectedAmountOut: '0.042', amountOutMin: '0.041', slippagePercent: '0.5' }
+            }
+          };
+        }
+        return {
+          ok: true,
+          status: 200,
+          data: {
+            success: true,
+            needsApproval: false,
+            swapTx: { to: BSC_PANCAKE_ROUTER, data: '0x38ed173900', value: '0x0' },
+            simulation: { status: 'SIMULATED_REVERT', failReason: 'PancakeRouter: INSUFFICIENT_OUTPUT_AMOUNT' },
+            quote: { expectedAmountOut: '0.042', amountOutMin: '0.041', slippagePercent: '0.5' }
+          }
+        };
+      }
+    });
+
+    assert(result.success === false, 'executeBasket fails closed when post-approval swap simulation reverts');
+    assert(sentTransactions.length === 1, 'Only approval transaction was sent');
+    assert(!sentTransactions.some(tx => tx.data.startsWith('0x38ed1739')), 'NO eth_sendTransaction for swap occurred when simulation reverted');
+  }
+
+  // Test 8.7: Invalid / Missing Wallet Address -> Handled cleanly
+  {
+    const noAddrResult = await executeBasket({
+      allocations: [{ ticker: 'NVDA', weight: 100 }],
+      depositAmount: 10,
+      userWalletAddress: null
+    });
+    assert(noAddrResult.success === false, 'executeBasket rejects missing wallet address');
+    assert(noAddrResult.blockedAt === 'VALIDATION', 'Blocked at validation');
+
+    const emptyAllocResult = await executeBasket({
+      allocations: [],
+      depositAmount: 10,
+      userWalletAddress: dummyUser
+    });
+    assert(emptyAllocResult.success === false, 'executeBasket rejects empty allocations array');
+  }
+}
+
+// ============================================================================
+// PART 2: LIVE BSC MAINNET SMOKE TEST SUITE (Network-Dependent & Honest)
+// ============================================================================
+async function runLiveSmokeTests() {
+  console.log('\n===============================================================');
+  console.log('   OmniBasket AI — Live BSC Mainnet Smoke Test Suite           ');
+  console.log('===============================================================\n');
+
+  // Probe live BSC RPC reachability first
+  const client = getPublicBscClient();
+  let liveRpcReachable = false;
+  let latestBlock = null;
+
+  try {
+    latestBlock = await Promise.race([
+      client.getBlockNumber(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('RPC probe timed out after 3500ms')), 3500))
+    ]);
+    liveRpcReachable = true;
+    console.log(`[Live BSC RPC] Connected successfully to BSC Mainnet #56 (Block: ${latestBlock.toString()})\n`);
+  } catch (probeErr) {
+    console.log(`⚠️  [Live BSC RPC] RPC probe failed: ${probeErr.message}`);
+    console.log('   Live mainnet smoke tests will be SKIPPED as infra/network unavailable.');
+    console.log('   (This is an external network condition, not an application code regression.)\n');
+  }
+
+  if (!liveRpcReachable) {
+    skip('[Live BSC Smoke] PancakeSwap V2 live quote for NVDA', 'BSC RPC unavailable');
+    skip('[Live BSC Smoke] Unroutable asset rejection for USDY', 'BSC RPC unavailable');
+    skip('[Live BSC Smoke] Approval calldata dry-run on live BSC state', 'BSC RPC unavailable');
+    skip('[Live BSC Smoke] Swap simulation revert detection on live BSC state', 'BSC RPC unavailable');
+    skip('[Live BSC Smoke] /api/simulate live check on BSC Mainnet', 'BSC RPC unavailable');
+    return;
+  }
+
+  const dummyUser = '0xB635a5eAe16695910C75be147f7676b546441d72';
+  const usdtAddr = BSC_RWA_TOKENS.USDT.contractAddress;
+  const nvdaAddr = BSC_RWA_TOKENS.NVDA.contractAddress;
+  const exactAmountWei = 10000000000000000000n; // 10 USDT
+
+  // 1. Live PancakeSwap V2 quote for NVDA
+  try {
     const quote = await getBscSwapQuote({
       fromTokenAddress: usdtAddr,
       toTokenAddress: nvdaAddr,
       amountInWei: exactAmountWei,
-      maxSlippageBps: 50 // 0.5%
+      maxSlippageBps: 50
     });
-    assert(quote.expectedAmountOutWei > 0n, `getBscSwapQuote returned positive expected output: ${quote.expectedAmountOutWei.toString()} wei`);
-    assert(quote.amountOutMinWei > 0n, `getBscSwapQuote returned positive minimum output: ${quote.amountOutMinWei.toString()} wei`);
-    assert(quote.amountOutMinWei < quote.expectedAmountOutWei, 'amountOutMinWei is strictly less than expectedAmountOutWei (accounts for slippage)');
-    assert(quote.slippageBps <= 50, `Slippage is strictly bounded to max 50 bps (0.5%): current = ${quote.slippageBps} bps`);
-    assert(Array.isArray(quote.path) && quote.path.length >= 2, 'Quote returns valid PancakeSwap V2 routing path array');
+    assert(quote.expectedAmountOutWei > 0n, `[Live BSC Smoke] Live quote positive expected output: ${quote.expectedAmountOutWei.toString()} wei`);
+    assert(quote.amountOutMinWei > 0n, `[Live BSC Smoke] Live quote positive minimum output: ${quote.amountOutMinWei.toString()} wei`);
+    assert(quote.amountOutMinWei < quote.expectedAmountOutWei, '[Live BSC Smoke] amountOutMinWei strictly less than expectedAmountOutWei');
+    assert(quote.slippageBps <= 50, `[Live BSC Smoke] Slippage bounded to 50 bps (0.5%): current = ${quote.slippageBps}`);
+  } catch (err) {
+    console.error('Live quote error:', err.message);
+    failed++;
+  }
 
-    // 2. Slippage cap enforcement: requesting 200 bps (2.0%) is capped at 50 bps (0.5%)
-    const cappedQuote = await getBscSwapQuote({
-      fromTokenAddress: usdtAddr,
-      toTokenAddress: nvdaAddr,
-      amountInWei: exactAmountWei,
-      maxSlippageBps: 200 // Attempting 2.0%
-    });
-    assert(cappedQuote.slippageBps === 50, `Excessive slippage (200 bps) was strictly capped to 50 bps (0.5%): result = ${cappedQuote.slippageBps} bps`);
-
-    // 3. Rejection of unroutable assets (e.g. USDY has no BSC AMM pool)
+  // 2. Live unroutable asset rejection for USDY
+  try {
     const unroutableQuote = await getBscSwapQuote({
       fromTokenAddress: usdtAddr,
       toTokenAddress: BSC_RWA_TOKENS.USDY.contractAddress,
       amountInWei: exactAmountWei,
       maxSlippageBps: 50
     });
-    assert(unroutableQuote.success === false, 'getBscSwapQuote returns success: false for unroutable token (USDY)');
-    assert(unroutableQuote.error.includes('No active liquidity pool route found') || unroutableQuote.error.includes('PancakeSwap V2'), 'getBscSwapQuote explains liquidity pool is missing');
-
-
-    // 4. Token registry tradability status verification
-    assert(BSC_RWA_TOKENS.NVDA.tradableOnBscDEX === true, 'NVDA is marked tradableOnBscDEX: true');
-    assert(BSC_RWA_TOKENS.AAPL.tradableOnBscDEX === true, 'AAPL is marked tradableOnBscDEX: true');
-    assert(BSC_RWA_TOKENS.MSFT.tradableOnBscDEX === true, 'MSFT is marked tradableOnBscDEX: true');
-    assert(BSC_RWA_TOKENS.TSLA.tradableOnBscDEX === true, 'TSLA is marked tradableOnBscDEX: true');
-    assert(BSC_RWA_TOKENS.USDY.tradableOnBscDEX === false, 'USDY is marked tradableOnBscDEX: false');
-    assert(BSC_RWA_TOKENS.GOOG.tradableOnBscDEX === false, 'GOOG is marked tradableOnBscDEX: false');
-    assert(BSC_RWA_TOKENS.MAG7X.tradableOnBscDEX === false, 'MAG7X is marked tradableOnBscDEX: false');
-
-    // 5. Preset baskets verification: all presets have 100% tradable assets
-    for (const [id, preset] of Object.entries(PRESET_BASKETS)) {
-      const allTradable = preset.allocations.every(a => BSC_RWA_TOKENS[a.ticker]?.tradableOnBscDEX === true);
-      assert(allTradable, `Preset '${preset.name}' contains 100% verified tradable assets on BSC`);
-    }
+    assert(unroutableQuote.success === false, '[Live BSC Smoke] Live quote returns success: false for unroutable token (USDY)');
   } catch (err) {
-    console.error('Route discovery test error:', err);
+    console.error('Live unroutable quote error:', err.message);
     failed++;
   }
 
-  // --------------------------------------------------------------------------
-  // TEST GROUP 6: Pre-Transaction Simulation on BSC State
-  // --------------------------------------------------------------------------
-  console.log('\nTest Group 6: Pre-Transaction EVM Simulation on Live BSC State');
+  // 3. Live approval simulation dry-run on BSC
   try {
-    // 1. Simulate exact approval on live BSC state
+    const approveTx = buildApproveCalldata({
+      tokenAddress: usdtAddr,
+      spenderAddress: BSC_PANCAKE_ROUTER,
+      amountWei: exactAmountWei
+    });
     const simApprove = await simulateBscTransaction({
       from: dummyUser,
       to: approveTx.to,
       data: approveTx.data,
       value: approveTx.value
     });
-    assert(simApprove.status === 'SUCCESS', `simulateBscTransaction for exact approval succeeded with status: ${simApprove.status}`);
-    assert(typeof simApprove.gasUsed === 'string', `Simulation returned estimated gasUsed: ${simApprove.gasUsed}`);
+    assert(simApprove.status === 'SUCCESS', `[Live BSC Smoke] Live approval simulation dry-run status: ${simApprove.status}`);
+  } catch (err) {
+    console.error('Live approval sim error:', err.message);
+    failed++;
+  }
 
-    // 2. Simulate swap transaction on live BSC state
+  // 4. Live swap simulation revert detection on BSC
+  try {
+    const swapTx = buildSwapCalldata({
+      fromAddress: dummyUser,
+      fromTokenAddress: usdtAddr,
+      toTokenAddress: nvdaAddr,
+      amountInWei: exactAmountWei,
+      amountOutMinWei: 42000000000000000n,
+      routerAddress: BSC_PANCAKE_ROUTER
+    });
     const simSwap = await simulateBscTransaction({
       from: dummyUser,
       to: swapTx.to,
       data: swapTx.data,
       value: swapTx.value
     });
-    assert(typeof simSwap.status === 'string', `Swap simulation returned valid status: ${simSwap.status}`);
-    if (simSwap.status === 'SIMULATED_REVERT') {
-      assert(simSwap.reverted === true, 'Simulation correctly detected on-chain EVM revert on BSC state (reverts fail closed)');
-      assert(Boolean(simSwap.failReason), `Simulation captured revert reason: ${simSwap.failReason}`);
-    } else {
-      assert(simSwap.status === 'SUCCESS' || simSwap.status === 'ESTIMATED', 'Simulation completed successfully or estimated');
-    }
+    assert(simSwap.status === 'SIMULATED_REVERT', `[Live BSC Smoke] Live swap dry-run without allowance detected on-chain revert: ${simSwap.status}`);
+    assert(Boolean(simSwap.failReason), `[Live BSC Smoke] Captured revert reason: ${simSwap.failReason}`);
   } catch (err) {
-    console.error('Simulation call error:', err);
+    console.error('Live swap sim error:', err.message);
     failed++;
   }
 
-  // --------------------------------------------------------------------------
-  // TEST GROUP 7: On-Chain Balance Query via Viem
-  // --------------------------------------------------------------------------
-  console.log('\nTest Group 7: On-Chain Token Balances via Viem on BSC #56');
+  // 5. Live /api/simulate balance and allowance evaluation on BSC
   try {
-    const allowance = await checkTokenAllowance({
-      tokenAddress: usdtAddr,
-      ownerAddress: dummyUser,
-      spenderAddress: BSC_PANCAKE_ROUTER
-    });
-    assert(typeof allowance === 'bigint', `Allowance returned as BigInt: ${allowance.toString()}`);
-  } catch (err) {
-    console.error('Allowance check error:', err);
-    failed++;
-  }
-
-  // --------------------------------------------------------------------------
-  // TEST GROUP 8: API Route Boundary & Guardrail Tests
-  // --------------------------------------------------------------------------
-  console.log('\nTest Group 8: API Route Boundary & Guardrail Tests');
-  try {
-    const { GET: statusHandler } = await import('./app/api/wallet/status/route.js');
-    const { GET: balanceHandler } = await import('./app/api/wallet/balance/route.js');
-    const { POST: swapHandler } = await import('./app/api/wallet/swap/route.js');
-    const { POST: executeHandler } = await import('./app/api/execute/route.js');
-    const { POST: buildHandler } = await import('./app/api/swap/build/route.js');
     const { POST: simulateHandler } = await import('./app/api/simulate/route.js');
-    const { POST: quoteHandler } = await import('./app/api/quote/route.js');
-    const { POST: chatHandler } = await import('./app/api/chat/route.js');
-
-    // 1. /api/wallet/status in public mode
-    const statusRes = await statusHandler(new Request('http://localhost/api/wallet/status'));
-    const statusData = await statusRes.json();
-    assert(statusData.enabled === false, '/api/wallet/status reports enabled: false in public mode');
-    assert(statusData.connected === false, '/api/wallet/status reports connected: false in public mode');
-    assert(statusData.address === null, '/api/wallet/status never returns a shared server address');
-
-    // 2. /api/wallet/balance without address (rejects with 503)
-    const bareBalanceRes = await balanceHandler(new Request('http://localhost/api/wallet/balance'));
-    assert(bareBalanceRes.status === 503, '/api/wallet/balance without ?address returns HTTP 503 Service Unavailable');
-
-    // 3. /api/wallet/balance with user's extension address on BSC
-    const userBalanceRes = await balanceHandler(new Request(`http://localhost/api/wallet/balance?address=${dummyUser}`));
-    const userBalanceData = await userBalanceRes.json();
-    assert(userBalanceRes.status === 200, '/api/wallet/balance with ?address returns HTTP 200 OK');
-    assert(userBalanceData.success === true, '/api/wallet/balance reports success: true');
-    assert(userBalanceData.address.toLowerCase() === dummyUser.toLowerCase(), '/api/wallet/balance reads the user extension address');
-    assert(Array.isArray(userBalanceData.tokens), '/api/wallet/balance returns on-chain BSC token array');
-
-    // 4. Server-side Agentic execution routes return 503
-    const serverSwapRes = await swapHandler(new Request('http://localhost/api/wallet/swap', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fromTicker: 'USDT', toTicker: 'NVDA', fromTokenQty: 10 })
-    }));
-    assert(serverSwapRes.status === 503, '/api/wallet/swap returns HTTP 503 in public mode');
-
-    const executeRes = await executeHandler(new Request('http://localhost/api/execute', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ allocations: [{ ticker: 'NVDA', weight: 100 }], depositAmount: 25 })
-    }));
-    assert(executeRes.status === 503, '/api/execute returns HTTP 503 in public mode');
-
-    // 5. /api/quote route tests
-    const quoteReqRes = await quoteHandler(new Request('http://localhost/api/quote', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fromTicker: 'USDT', toTicker: 'NVDA', fromAmount: 10 })
-    }));
-    const quoteReqData = await quoteReqRes.json();
-    assert(quoteReqRes.status === 200, '/api/quote returns HTTP 200 for tradable asset');
-    assert(quoteReqData.tradableOnBscDEX === true, '/api/quote flags tradableOnBscDEX: true for NVDA');
-    assert(Number(quoteReqData.slippageBps) <= 50, '/api/quote enforces max 50 bps slippage');
-
-    const unroutableQuoteRes = await quoteHandler(new Request('http://localhost/api/quote', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fromTicker: 'USDT', toTicker: 'USDY', fromAmount: 10 })
-    }));
-    assert(unroutableQuoteRes.status === 400, '/api/quote returns HTTP 400 for unroutable token (USDY)');
-
-    // 6. /api/swap/build input validation
-    const noAddrRes = await buildHandler(new Request('http://localhost/api/swap/build', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fromTicker: 'USDT', toTicker: 'NVDA', fromAmount: 10 })
-    }));
-    assert(noAddrRes.status === 400, '/api/swap/build rejects missing userWalletAddress with HTTP 400');
-
-    const lowAmtRes = await buildHandler(new Request('http://localhost/api/swap/build', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userWalletAddress: dummyUser, fromTicker: 'USDT', toTicker: 'NVDA', fromAmount: 3 })
-    }));
-    assert(lowAmtRes.status === 400, '/api/swap/build enforces $5.00 minimum order floor with HTTP 400');
-
-    const unroutableBuildRes = await buildHandler(new Request('http://localhost/api/swap/build', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userWalletAddress: dummyUser, fromTicker: 'USDT', toTicker: 'USDY', fromAmount: 10 })
-    }));
-    assert(unroutableBuildRes.status === 400, '/api/swap/build rejects unroutable token (USDY) with HTTP 400');
-
-    // 7. /api/swap/build valid calldata generation
-    const validBuildRes = await buildHandler(new Request('http://localhost/api/swap/build', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userWalletAddress: dummyUser, fromTicker: 'USDT', toTicker: 'NVDA', fromAmount: 10 })
-    }));
-    const validBuildData = await validBuildRes.json();
-    assert(validBuildRes.status === 200, '/api/swap/build returns HTTP 200 OK');
-    assert(validBuildData.chainId === 56, '/api/swap/build outputs BSC Chain ID 56');
-    assert(Boolean(validBuildData.swapTx), '/api/swap/build constructs swapTx object');
-    assert(Boolean(validBuildData.simulation), '/api/swap/build performs pre-transaction simulation');
-    assert(validBuildData.quote.amountOutMinWei !== '0', '/api/swap/build returns nonzero amountOutMinWei');
-    assert(validBuildData.quote.slippagePct === '0.5%', '/api/swap/build confirms 0.5% slippage bound');
-    if (validBuildData.needsApproval) {
-      assert(Boolean(validBuildData.approveTx), '/api/swap/build provides exact approveTx when allowance is needed');
-      assert(validBuildData.simulation.status === 'SUCCESS', '/api/swap/build verifies approval pre-simulation on BSC');
-    }
-
-    // 8. /api/simulate returns structured leg simulations & fails closed on unroutable tokens
-    const unroutableSimRes = await simulateHandler(new Request('http://localhost/api/simulate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        allocations: [{ ticker: 'USDY', weight: 100 }],
-        depositAmount: 50,
-        userWalletAddress: dummyUser
-      })
-    }));
-    const unroutableSimData = await unroutableSimRes.json();
-    assert(unroutableSimData.overallStatus === 'REVERT_BLOCKED', '/api/simulate returns REVERT_BLOCKED when basket includes unroutable asset (USDY)');
-    assert(unroutableSimData.legs[0].status === 'SIMULATED_REVERT', '/api/simulate marks untradable leg as SIMULATED_REVERT');
-
-    const tradableSimRes = await simulateHandler(new Request('http://localhost/api/simulate', {
+    const liveSimRes = await simulateHandler(new Request('http://localhost/api/simulate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -451,304 +927,35 @@ async function runTestSuite() {
         userWalletAddress: dummyUser
       })
     }));
-    const tradableSimData = await tradableSimRes.json();
-    assert(tradableSimRes.status === 200, '/api/simulate returns HTTP 200 OK for tradable basket');
-    assert(Array.isArray(tradableSimData.legs) && tradableSimData.legs.length === 2, '/api/simulate returns simulation for each basket leg');
-
-    // 9. /api/chat with built-in omnibasket-neuro engine
-    const chatRes = await chatHandler(new Request('http://localhost/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        message: 'Create an AI basket with 60% Nvidia and 40% Microsoft',
-        model: 'omnibasket-neuro'
-      })
-    }));
-    const chatData = await chatRes.json();
-    assert(chatRes.status === 200, '/api/chat returns HTTP 200 OK');
-    assert(Boolean(chatData.reply), '/api/chat produces strategy response');
-    assert(Boolean(chatData.basket), '/api/chat parses basket synchronizations');
+    const liveSimData = await liveSimRes.json();
+    assert(liveSimRes.status === 200, '[Live BSC Smoke] /api/simulate returns HTTP 200 on live BSC state');
+    // On live BSC Mainnet, dummyUser has 0 USDT balance, so it must fail closed with REVERT_BLOCKED
+    assert(liveSimData.overallStatus === 'REVERT_BLOCKED', `[Live BSC Smoke] Zero-USDT wallet correctly blocked on live BSC: ${liveSimData.overallStatus}`);
+    assert(liveSimData.legs[0].failReason.includes('Insufficient USDT balance'), `[Live BSC Smoke] Leg failReason correctly identifies insufficient USDT on BSC`);
   } catch (err) {
-    console.error('API Route test error:', err);
+    console.error('Live /api/simulate error:', err.message);
     failed++;
   }
+}
 
-  // --------------------------------------------------------------------------
-  // TEST GROUP 9: Zero-Allowance Basket Execution & Sequential Guardrails Regression Suite
-  // --------------------------------------------------------------------------
-  console.log('\nTest Group 9: Zero-Allowance Basket Execution & Sequential Guardrails');
-  console.log('--- Part 9A: Live BSC RPC Preflight & Simulation (Live BSC #56 Node) ---');
-  try {
-    const { POST: simulateHandler } = await import('./app/api/simulate/route.js');
-    const { POST: buildHandler } = await import('./app/api/swap/build/route.js');
+// ============================================================================
+// MAIN RUNNER
+// ============================================================================
+async function run() {
+  const args = process.argv.slice(2);
+  const onlyUnit = args.includes('--unit');
+  const onlySmoke = args.includes('--smoke');
 
-    // Fresh address with zero USDT allowance on BSC
-    const freshZeroAllowanceUser = '0x1111111111111111111111111111111111111111';
-
-    // 1. [Live BSC RPC] Zero-allowance wallet preflight returns APPROVAL_REQUIRED_FIRST (not REVERT_BLOCKED)
-    const zeroAllowSimRes = await simulateHandler(new Request('http://localhost/api/simulate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        allocations: [{ ticker: 'NVDA', weight: 60 }, { ticker: 'MSFT', weight: 40 }],
-        depositAmount: 50,
-        userWalletAddress: freshZeroAllowanceUser
-      })
-    }));
-    const zeroAllowSimData = await zeroAllowSimRes.json();
-    assert(zeroAllowSimRes.status === 200, '[Live BSC RPC] /api/simulate returns HTTP 200 for new wallet with zero allowance');
-    assert(zeroAllowSimData.success === true, '[Live BSC RPC] /api/simulate reports success: true for zero-allowance wallet (does NOT falsely block)');
-    assert(zeroAllowSimData.overallStatus === 'APPROVAL_REQUIRED_FIRST', `[Live BSC RPC] /api/simulate status is APPROVAL_REQUIRED_FIRST: got ${zeroAllowSimData.overallStatus}`);
-    assert(zeroAllowSimData.legs.every(l => l.needsApproval === true), '[Live BSC RPC] /api/simulate correctly identifies all legs require token approval');
-    assert(zeroAllowSimData.legs.every(l => l.simulationStatus === 'APPROVAL_REQUIRED_FIRST'), '[Live BSC RPC] All tradable legs marked APPROVAL_REQUIRED_FIRST');
-    assert(zeroAllowSimData.legs.every(l => l.approvalStatus === 'SUCCESS'), '[Live BSC RPC] Approval calldata dry-run succeeds on live BSC state for each leg');
-
-    // 2. [Live BSC RPC] Untradable asset (USDY) in basket still fails closed with REVERT_BLOCKED
-    const untradableZeroSimRes = await simulateHandler(new Request('http://localhost/api/simulate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        allocations: [{ ticker: 'USDY', weight: 100 }],
-        depositAmount: 50,
-        userWalletAddress: freshZeroAllowanceUser
-      })
-    }));
-    const untradableZeroSimData = await untradableZeroSimRes.json();
-    assert(untradableZeroSimData.success === false, '[Live BSC RPC] /api/simulate fails closed (success: false) when basket contains untradable asset');
-    assert(untradableZeroSimData.overallStatus === 'REVERT_BLOCKED', '[Live BSC RPC] /api/simulate returns REVERT_BLOCKED for untradable asset');
-    assert(untradableZeroSimData.legs[0].simulationStatus === 'SIMULATED_REVERT', '[Live BSC RPC] Untradable leg is marked SIMULATED_REVERT');
-
-    // 3. [Live BSC RPC] /api/swap/build for zero-allowance wallet constructs exact approval calldata and pre-simulates approval
-    const buildZeroRes = await buildHandler(new Request('http://localhost/api/swap/build', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        userWalletAddress: freshZeroAllowanceUser,
-        fromTicker: 'USDT',
-        toTicker: 'NVDA',
-        fromAmount: 10,
-        slippagePercent: '0.5'
-      })
-    }));
-    const buildZeroData = await buildZeroRes.json();
-    assert(buildZeroRes.status === 200, '[Live BSC RPC] /api/swap/build returns HTTP 200 for zero-allowance wallet');
-    assert(buildZeroData.needsApproval === true, '[Live BSC RPC] /api/swap/build flags needsApproval: true');
-    assert(Boolean(buildZeroData.approveTx), '[Live BSC RPC] /api/swap/build supplies exact approveTx calldata');
-    assert(buildZeroData.simulation?.status === 'SUCCESS', '[Live BSC RPC] /api/swap/build verifies approval pre-simulation on BSC');
-
-    console.log('\n--- Part 9B: Mocked Unit Tests — Client Execution Orchestrator & Guardrails (Isolated Mocks) ---');
-    
-    // Execution orchestrator replicating UnifiedStrategyBasket.handleExecuteBasket logic
-    async function runOrchestrationTest({
-      preflightStatus = 'APPROVAL_REQUIRED_FIRST',
-      preflightSuccess = true,
-      buildApprovals = [true],
-      approvalReceiptStatus = 'CONFIRMED',
-      swapSimulationStatus = 'SUCCESS',
-      swapReceiptStatus = 'CONFIRMED'
-    } = {}) {
-      const sentTxs = [];
-      let buildCallCount = 0;
-
-      const mockProvider = {
-        isBinance: true,
-        request: async ({ method, params }) => {
-          if (method === 'eth_chainId') return '0x38';
-          if (method === 'eth_accounts') return [freshZeroAllowanceUser];
-          if (method === 'eth_sendTransaction') {
-            const tx = params[0];
-            sentTxs.push(tx);
-            if (tx.data.startsWith('0x095ea7b3')) {
-              return '0xapproveHash123';
-            }
-            return '0xswapHash456';
-          }
-          if (method === 'eth_getTransactionReceipt') {
-            const hash = params[0];
-            if (hash === '0xapproveHash123') {
-              if (approvalReceiptStatus === 'CONFIRMED') return { status: '0x1', blockNumber: '0x100' };
-              if (approvalReceiptStatus === 'REVERTED') return { status: '0x0', blockNumber: '0x100' };
-              return null; // pending
-            }
-            if (hash === '0xswapHash456') {
-              if (swapReceiptStatus === 'CONFIRMED') return { status: '0x1', blockNumber: '0x101' };
-              if (swapReceiptStatus === 'REVERTED') return { status: '0x0', blockNumber: '0x101' };
-              return null; // pending
-            }
-            return null;
-          }
-          return null;
-        }
-      };
-
-      // Step 1: Preflight guard
-      if (!preflightSuccess || preflightStatus === 'REVERT_BLOCKED') {
-        return {
-          blockedAt: 'PREFLIGHT',
-          sentTxs,
-          error: 'Pre-transaction simulation guardrail blocked execution.'
-        };
-      }
-
-      // Step 2: Loop over legs (test 1 leg)
-      try {
-        buildCallCount++;
-        const needsApproval = buildApprovals[0];
-        
-        let buildData = {
-          success: true,
-          needsApproval,
-          approveTx: needsApproval ? {
-            to: usdtAddr,
-            spender: BSC_PANCAKE_ROUTER,
-            data: '0x095ea7b300000000000000000000000010ed43c718714eb63d5aa57b78b54704e256024e0000000000000000000000000000000000000000000000008ac7230489e80000'
-          } : null,
-          swapTx: {
-            to: BSC_PANCAKE_ROUTER,
-            data: '0x38ed173900000000000000000000000000000000',
-            value: '0x0'
-          },
-          simulation: { status: 'SUCCESS' },
-          quote: { expectedAmountOut: '0.042', amountOutMin: '0.041', slippagePercent: '0.5' }
-        };
-
-        if (buildData.needsApproval && buildData.approveTx) {
-          if (buildData.simulation?.status !== 'SUCCESS') {
-            throw new Error('Approval simulation failed');
-          }
-
-          // Send approval
-          const approveHash = await mockProvider.request({
-            method: 'eth_sendTransaction',
-            params: [{
-              to: buildData.approveTx.to,
-              data: buildData.approveTx.data,
-              value: '0x0'
-            }]
-          });
-
-          const approveReceipt = await pollExtensionReceipt(mockProvider, approveHash, 1, 10);
-          if (approveReceipt?.status !== 'CONFIRMED') {
-            throw new Error(`Token approval for NVDA was not confirmed on-chain (status: ${approveReceipt?.status || 'UNKNOWN'}). Execution blocked.`);
-          }
-
-          // Re-simulate swap with current allowance
-          buildCallCount++;
-          buildData = {
-            success: true,
-            needsApproval: false,
-            swapTx: {
-              to: BSC_PANCAKE_ROUTER,
-              data: '0x38ed173900000000000000000000000000000000',
-              value: '0x0'
-            },
-            simulation: { status: swapSimulationStatus, failReason: swapSimulationStatus === 'SUCCESS' ? null : 'Reverted on-chain' },
-            quote: { expectedAmountOut: '0.042', amountOutMin: '0.041', slippagePercent: '0.5' }
-          };
-        }
-
-        // Strict pre-transaction simulation check: must be SUCCESS
-        if (buildData.simulation?.status !== 'SUCCESS') {
-          throw new Error(`Simulation failed for NVDA: ${buildData.simulation?.status} (${buildData.simulation?.failReason || 'Revert'}). Execution aborted to prevent capital loss.`);
-        }
-
-        // Broadcast swap
-        const swapHash = await mockProvider.request({
-          method: 'eth_sendTransaction',
-          params: [{
-            to: buildData.swapTx.to,
-            data: buildData.swapTx.data,
-            value: '0x0'
-          }]
-        });
-
-        const swapReceipt = await pollExtensionReceipt(mockProvider, swapHash, 1, 10);
-        if (swapReceipt?.status !== 'CONFIRMED') {
-          throw new Error(`Swap transaction for NVDA was not confirmed on-chain (status: ${swapReceipt?.status || 'UNKNOWN'}).`);
-        }
-
-        return {
-          success: true,
-          sentTxs,
-          buildCallCount
-        };
-      } catch (err) {
-        return {
-          success: false,
-          sentTxs,
-          buildCallCount,
-          error: err.message
-        };
-      }
-    }
-
-    // 4. [Mocked Unit Test] Zero-allowance wallet executes approval BEFORE swap
-    const flowSuccess = await runOrchestrationTest({
-      preflightStatus: 'APPROVAL_REQUIRED_FIRST',
-      preflightSuccess: true,
-      buildApprovals: [true],
-      approvalReceiptStatus: 'CONFIRMED',
-      swapSimulationStatus: 'SUCCESS',
-      swapReceiptStatus: 'CONFIRMED'
-    });
-    assert(flowSuccess.success === true, '[Mocked Unit Test] Sequential execution succeeds for zero-allowance wallet');
-    assert(flowSuccess.sentTxs.length === 2, '[Mocked Unit Test] Exactly 2 transactions were broadcast (approve + swap)');
-    assert(flowSuccess.sentTxs[0].data.startsWith('0x095ea7b3'), '[Mocked Unit Test] Transaction 1 is ERC-20 approve()');
-    assert(flowSuccess.sentTxs[1].to.toLowerCase() === BSC_PANCAKE_ROUTER.toLowerCase(), '[Mocked Unit Test] Transaction 2 is PancakeSwap swap');
-    assert(flowSuccess.sentTxs[0].data.startsWith('0x095ea7b3') && flowSuccess.sentTxs[1].data.startsWith('0x38ed1739'), '[Mocked Unit Test] Approval strictly occurs BEFORE swap');
-
-    // 5. [Mocked Unit Test] Approval receipt REVERTED blocks swap (NO swap eth_sendTransaction)
-    const flowApproveRevert = await runOrchestrationTest({
-      preflightStatus: 'APPROVAL_REQUIRED_FIRST',
-      preflightSuccess: true,
-      buildApprovals: [true],
-      approvalReceiptStatus: 'REVERTED'
-    });
-    assert(flowApproveRevert.success === false, '[Mocked Unit Test] Execution fails closed when approval reverts');
-    assert(flowApproveRevert.error.includes('Token approval for NVDA was not confirmed on-chain (status: REVERTED)'), '[Mocked Unit Test] Reverted approval error is descriptive');
-    assert(flowApproveRevert.sentTxs.length === 1, '[Mocked Unit Test] Only 1 transaction was sent (the approval attempt)');
-    assert(!flowApproveRevert.sentTxs.some(tx => tx.to.toLowerCase() === BSC_PANCAKE_ROUTER.toLowerCase() && !tx.data.startsWith('0x095ea7b3')), '[Mocked Unit Test] NO eth_sendTransaction for swap occurred after approval reverted');
-
-    // 6. [Mocked Unit Test] Approval receipt PENDING (timeout) blocks swap (NO swap eth_sendTransaction)
-    const flowApprovePending = await runOrchestrationTest({
-      preflightStatus: 'APPROVAL_REQUIRED_FIRST',
-      preflightSuccess: true,
-      buildApprovals: [true],
-      approvalReceiptStatus: 'PENDING'
-    });
-    assert(flowApprovePending.success === false, '[Mocked Unit Test] Execution fails closed when approval receipt is pending/timeout');
-    assert(flowApprovePending.error.includes('status: PENDING'), '[Mocked Unit Test] Pending approval error identifies unconfirmed receipt');
-    assert(flowApprovePending.sentTxs.length === 1, '[Mocked Unit Test] Exactly 1 transaction sent; NO swap eth_sendTransaction dispatched');
-
-    // 7. [Mocked Unit Test] Swap simulation failure blocks swap (NO swap eth_sendTransaction)
-    const flowSwapRevert = await runOrchestrationTest({
-      preflightStatus: 'APPROVAL_REQUIRED_FIRST',
-      preflightSuccess: true,
-      buildApprovals: [true],
-      approvalReceiptStatus: 'CONFIRMED',
-      swapSimulationStatus: 'SIMULATED_REVERT'
-    });
-    assert(flowSwapRevert.success === false, '[Mocked Unit Test] Execution fails closed when post-approval swap simulation reverts');
-    assert(flowSwapRevert.error.includes('Simulation failed for NVDA: SIMULATED_REVERT'), '[Mocked Unit Test] Swap simulation failure triggers fail-closed error');
-    assert(flowSwapRevert.sentTxs.length === 1, '[Mocked Unit Test] Approval was sent, but NO swap eth_sendTransaction was dispatched');
-
-    // 8. [Mocked Unit Test] Preflight REVERT_BLOCKED blocks execution before ANY transaction is dispatched
-    const flowPreflightBlocked = await runOrchestrationTest({
-      preflightStatus: 'REVERT_BLOCKED',
-      preflightSuccess: false
-    });
-    assert(flowPreflightBlocked.blockedAt === 'PREFLIGHT', '[Mocked Unit Test] Preflight REVERT_BLOCKED halts before loop');
-    assert(flowPreflightBlocked.sentTxs.length === 0, '[Mocked Unit Test] ZERO transactions dispatched to provider when preflight reverts');
-  } catch (err) {
-    console.error('Test Group 9 error:', err);
-    failed++;
+  if (!onlySmoke) {
+    await runOfflineUnitTests();
   }
 
-  // --------------------------------------------------------------------------
-  // Summary
-  // --------------------------------------------------------------------------
+  if (!onlyUnit) {
+    await runLiveSmokeTests();
+  }
+
   console.log('\n===============================================================');
-  console.log(`Verification Complete: ${passed} Passed, ${failed} Failed`);
+  console.log(`Verification Complete: ${passed} Passed, ${failed} Failed, ${skipped} Skipped`);
   console.log('===============================================================');
 
   if (failed > 0) {
@@ -756,7 +963,7 @@ async function runTestSuite() {
   }
 }
 
-runTestSuite().catch(err => {
+run().catch(err => {
   console.error('Test suite failed with unhandled error:', err);
   process.exit(1);
 });

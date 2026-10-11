@@ -27,7 +27,18 @@ const ERC20_ABI = parseAbi([
   'function symbol() view returns (string)'
 ]);
 
+let customPublicBscClient = null;
+
+export function setCustomPublicBscClient(client) {
+  customPublicBscClient = client;
+}
+
+export function getCustomPublicBscClient() {
+  return customPublicBscClient;
+}
+
 export function getPublicBscClient() {
+  if (customPublicBscClient) return customPublicBscClient;
   return createPublicClient({
     chain: bsc,
     transport: http(BSC_RPCS[0], {

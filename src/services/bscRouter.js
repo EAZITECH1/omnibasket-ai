@@ -1,6 +1,8 @@
 import { encodeFunctionData, parseAbi, isAddress } from 'viem';
-import { getPublicBscClient } from './bscBalanceReader.js';
+import { getPublicBscClient, setCustomPublicBscClient, getCustomPublicBscClient } from './bscBalanceReader.js';
 import { BSC_RWA_TOKENS } from './tokens.js';
+
+export { getPublicBscClient, setCustomPublicBscClient, getCustomPublicBscClient };
 
 // Official PancakeSwap V2 Router on BNB Smart Chain Mainnet (Chain ID 56)
 export const BSC_PANCAKE_ROUTER = '0x10ED43C718714eb63d5aA57B78B54704E256024E';
@@ -239,21 +241,16 @@ export async function checkTokenAllowance({
   spenderAddress = BSC_PANCAKE_ROUTER
 }) {
   if (!isAddress(tokenAddress) || !isAddress(ownerAddress) || !isAddress(spenderAddress)) {
-    return 0n;
+    throw new Error('Valid tokenAddress, ownerAddress, and spenderAddress are required for allowance check.');
   }
   const client = getPublicBscClient();
-  try {
-    const allowance = await client.readContract({
-      address: tokenAddress,
-      abi: ERC20_ABI,
-      functionName: 'allowance',
-      args: [ownerAddress, spenderAddress]
-    });
-    return allowance;
-  } catch (err) {
-    console.warn('Allowance check error:', err.message);
-    return 0n;
-  }
+  const allowance = await client.readContract({
+    address: tokenAddress,
+    abi: ERC20_ABI,
+    functionName: 'allowance',
+    args: [ownerAddress, spenderAddress]
+  });
+  return allowance;
 }
 
 /**
@@ -264,21 +261,16 @@ export async function checkTokenBalance({
   ownerAddress
 }) {
   if (!isAddress(tokenAddress) || !isAddress(ownerAddress)) {
-    return 0n;
+    throw new Error('Valid tokenAddress and ownerAddress are required for balance check.');
   }
   const client = getPublicBscClient();
-  try {
-    const balance = await client.readContract({
-      address: tokenAddress,
-      abi: ERC20_ABI,
-      functionName: 'balanceOf',
-      args: [ownerAddress]
-    });
-    return balance;
-  } catch (err) {
-    console.warn('Balance check error:', err.message);
-    return 0n;
-  }
+  const balance = await client.readContract({
+    address: tokenAddress,
+    abi: ERC20_ABI,
+    functionName: 'balanceOf',
+    args: [ownerAddress]
+  });
+  return balance;
 }
 
 /**

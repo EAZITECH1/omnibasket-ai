@@ -8,6 +8,7 @@ import {
   buildSwapCalldata, 
   buildApproveCalldata,
   checkTokenAllowance,
+  checkTokenBalance,
   simulateBscTransaction, 
   BSC_PANCAKE_ROUTER 
 } from '../../../services/bscRouter.js';
@@ -21,9 +22,14 @@ export async function POST(req) {
       return Response.json({ success: false, error: 'Valid allocations array is required.' }, { status: 400 });
     }
 
-    const effectiveAddress = (userWalletAddress && isAddress(userWalletAddress))
-      ? userWalletAddress
-      : '0x000000000000000000000000000000000000dEaD';
+    if (!userWalletAddress || !isAddress(userWalletAddress)) {
+      return Response.json({ 
+        success: false, 
+        error: 'Valid userWalletAddress is required for BSC transaction simulation.' 
+      }, { status: 400 });
+    }
+
+    const effectiveAddress = userWalletAddress;
 
     const fromToken = BSC_RWA_TOKENS.USDT.contractAddress;
     const legResults = [];
@@ -94,12 +100,66 @@ export async function POST(req) {
 
       const toAmountTokens = Number(quote.expectedAmountOutWei) / 1e18;
 
-      // Check on-chain allowance on BSC
-      const currentAllowance = await checkTokenAllowance({
-        tokenAddress: fromToken,
-        ownerAddress: effectiveAddress,
-        spenderAddress: BSC_PANCAKE_ROUTER
-      });
+      // 1. Check on-chain USDT balance on BSC
+      let currentBalance = 0n;
+      try {
+        currentBalance = await checkTokenBalance({
+          tokenAddress: fromToken,
+          ownerAddress: effectiveAddress
+        });
+      } catch (balanceErr) {
+        legResults.push({
+          ticker: alloc.ticker,
+          symbol: targetToken.symbol,
+          name: targetToken.name,
+          contractAddress: targetToken.contractAddress,
+          weight: alloc.weight,
+          targetUsd,
+          status: 'SIMULATED_REVERT',
+          simulationStatus: 'SIMULATED_REVERT',
+          failReason: `Balance lookup failed for USDT: ${balanceErr.message || 'RPC read failure'}. Preflight blocked.`
+        });
+        continue;
+      }
+
+      if (currentBalance < amountWei) {
+        const availableUsdt = (Number(currentBalance) / 1e18).toFixed(2);
+        legResults.push({
+          ticker: alloc.ticker,
+          symbol: targetToken.symbol,
+          name: targetToken.name,
+          contractAddress: targetToken.contractAddress,
+          weight: alloc.weight,
+          targetUsd,
+          status: 'SIMULATED_REVERT',
+          simulationStatus: 'SIMULATED_REVERT',
+          failReason: `Insufficient USDT balance for ${alloc.ticker}: required $${targetUsd.toFixed(2)}, available $${availableUsdt}. Preflight blocked to prevent execution failure.`
+        });
+        continue;
+      }
+
+      // 2. Check on-chain allowance on BSC
+      let currentAllowance = 0n;
+      try {
+        currentAllowance = await checkTokenAllowance({
+          tokenAddress: fromToken,
+          ownerAddress: effectiveAddress,
+          spenderAddress: BSC_PANCAKE_ROUTER
+        });
+      } catch (allowanceErr) {
+        legResults.push({
+          ticker: alloc.ticker,
+          symbol: targetToken.symbol,
+          name: targetToken.name,
+          contractAddress: targetToken.contractAddress,
+          weight: alloc.weight,
+          targetUsd,
+          status: 'SIMULATED_REVERT',
+          simulationStatus: 'SIMULATED_REVERT',
+          failReason: `Allowance lookup failed for USDT: ${allowanceErr.message || 'RPC read failure'}. Preflight blocked.`
+        });
+        continue;
+      }
 
       const needsApproval = currentAllowance < amountWei;
 
@@ -222,10 +282,10 @@ export async function POST(req) {
       estimatedGas: `${(totalGasGwei * 3 / 1e9).toFixed(5)} BNB (~$0.92)`,
       simulationPassed: !hasRevert,
       verificationNote: hasRevert
-        ? 'Pre-transaction simulation detected EVM revert or unroutable token on BSC state. Order broadcast blocked.'
+        ? 'Pre-transaction simulation detected EVM revert, insufficient balance, or unroutable token on BSC state. Order broadcast blocked.'
         : hasApprovalPending
-        ? 'All legs routed and quoted with valid slippage bounds. Sequential token approval required before swap execution.'
-        : 'All legs simulated successfully on BSC state with verified allowance.'
+        ? 'All legs routed and quoted with valid slippage bounds. Sufficient balance verified. Sequential token approval required before swap execution.'
+        : 'All legs simulated successfully on BSC state with verified balance and allowance.'
     });
   } catch (error) {
     console.error('Simulation API Error:', error);

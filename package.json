@@ -9,6 +9,8 @@
     "build": "next build",
     "start": "next start",
     "test": "node src/test-suite.js",
+    "test:unit": "node src/test-suite.js --unit",
+    "test:smoke": "node src/test-suite.js --smoke",
     "test-tokens": "node src/test-tokens.js",
     "test-quote": "node --env-file=.env src/test-quote.js"
   },
