@@ -35,6 +35,12 @@ export async function fetchWithX402Payment(targetUrl) {
     payload: initialBody
   });
 
+  // Explicitly verify payment network is strictly BNB Smart Chain (eip155:56)
+  const isBsc = initialBody.accepts?.some(a => a.network === 'eip155:56');
+  if (!isBsc) {
+    throw new Error('x402 payment requirements must specify BNB Smart Chain (eip155:56).');
+  }
+
   // Step 2: Use Binance Agentic Wallet (`baw`) to preview payment options
   const reqStr = JSON.stringify(initialBody);
   const previewCmd = `baw x402-payment preview --paymentRequirements '${reqStr.replace(/'/g, "'\\''")}' --json`;

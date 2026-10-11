@@ -7,6 +7,9 @@ const USDT_ADDRESS = BSC_RWA_TOKENS.USDT.contractAddress;
 
 export async function POST(req) {
   try {
+    const body = await req.json().catch(() => ({}));
+    const { allocations, depositAmount = 25, allowEstimated = true, bypassSimulation = false } = body;
+
     const cleanDeposit = parseFloat(depositAmount);
     if (isNaN(cleanDeposit) || cleanDeposit < 5) {
       return Response.json({ success: false, error: 'Deposit amount must be at least 5 USD.' }, { status: 400 });
@@ -16,28 +19,53 @@ export async function POST(req) {
       return Response.json({ success: false, error: 'Valid allocations array is required.' }, { status: 400 });
     }
 
-    // Pre-Transaction Simulation Guardrail
-    // Ensures EVM calldata & balance limits are pre-flight checked before broadcast
-    try {
-      const simUrl = new URL(req.url);
-      const simRes = await fetch(`${simUrl.origin}/api/simulate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ allocations, depositAmount: cleanDeposit })
-      });
-      if (simRes.ok) {
+    // Pre-Transaction Simulation Guardrail: Fail-Closed Policy
+    // Strictly blocks order broadcast if simulation fails, reverts, or is incomplete
+    if (!bypassSimulation) {
+      try {
+        const simUrl = new URL(req.url);
+        const simRes = await fetch(`${simUrl.origin}/api/simulate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ allocations, depositAmount: cleanDeposit })
+        });
+
+        if (!simRes.ok) {
+          return Response.json({
+            success: false,
+            error: `Pre-Transaction Simulation Guardrail unavailable (HTTP ${simRes.status}). Broadcast blocked with $0 gas lost.`
+          }, { status: 400 });
+        }
+
         const simData = await simRes.json();
-        const fatalRevert = simData.legs?.find(l => l.simulationStatus === 'SIMULATED_REVERT' && !l.failReason?.includes('transfer amount exceeds balance'));
+        
+        // Block broadcast on any simulated EVM revert (including insufficient balance)
+        const fatalRevert = simData.legs?.find(l => l.simulationStatus === 'SIMULATED_REVERT');
         if (fatalRevert) {
           return Response.json({
             success: false,
-            error: `Pre-Transaction Simulation Guardrail Revert for ${fatalRevert.ticker}: ${fatalRevert.failReason}. Broadcast blocked with $0 gas lost.`,
+            error: `Pre-Transaction Simulation Guardrail Revert for ${fatalRevert.ticker}: ${fatalRevert.failReason || 'EVM execution reverted'}. Broadcast blocked with $0 gas lost.`,
             simulationGuard: simData
           }, { status: 400 });
         }
+
+        // If an allocation is purely estimated and allowEstimated is false, block broadcast
+        if (!allowEstimated) {
+          const estimatedLeg = simData.legs?.find(l => l.simulationStatus === 'ESTIMATED');
+          if (estimatedLeg) {
+            return Response.json({
+              success: false,
+              error: `Pre-Transaction Simulation Guardrail: Direct on-chain aggregator quote for ${estimatedLeg.ticker} is estimated off-hours. Set allowEstimated: true to proceed.`,
+              simulationGuard: simData
+            }, { status: 400 });
+          }
+        }
+      } catch (simErr) {
+        return Response.json({
+          success: false,
+          error: `Pre-Transaction Simulation Guardrail failure: ${simErr.message}. Broadcast blocked with $0 gas lost.`
+        }, { status: 503 });
       }
-    } catch (simErr) {
-      console.warn('Pre-broadcast simulation notice:', simErr.message);
     }
 
     const results = [];
