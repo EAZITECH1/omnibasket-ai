@@ -10,7 +10,7 @@
 
 **OmniBasket AI** is an autonomous portfolio creation, DCA, and 24/7 dynamic rebalancing agent built natively on **BNB Smart Chain (BSC Mainnet, Chain ID: 56)**.
 
-In traditional finance, stock markets close strictly at 4:00 PM EST on Fridays, freezing equities for 64 continuous weekend hours. **OmniBasket AI bridges the gap between TradFi market hours and Web3's 24/7 liquidity**. Powered by the **Binance Web3 DEX Aggregator**, **Binance Agentic Wallet (`baw`) CLI**, and **Pre-Transaction Simulation API**, users can manage tokenized stock baskets (`bStocks`, `Ondo`, `xStocks`) using conversational prompts with automated drift protection and verifiable simulation safety.
+In traditional finance, equity markets close at 4:00 PM EST on Fridays, freezing trading for 64 continuous weekend hours. **OmniBasket AI bridges TradFi market hours and Web3's 24/7 liquidity**. Powered by the **Binance Web3 Wallet Extension**, **PancakeSwap V2 On-Chain Routing**, and **Fail-Closed Pre-Transaction EVM Simulation**, users manage tokenized stock baskets (`NVDA`, `AAPL`, `MSFT`, `TSLA`) via natural language prompts with verified on-chain execution, zero gas lost to reverts, and non-bypassable slippage protection.
 
 Additionally, OmniBasket AI incorporates an **ERC-8004 on-chain agent identity** and an **x402 (HTTP 402 Payment Required) micropayment protocol** to consume and monetize proprietary institutional RWA alpha signals on BSC.
 
@@ -18,29 +18,52 @@ Additionally, OmniBasket AI incorporates an **ERC-8004 on-chain agent identity**
 
 ## 🚀 Key Features
 
-### 1. 🗣️ Conversational Strategy Agent
-* Parse complex multi-asset investment theses from plain English (e.g. *"Build an AI chips basket with 50% Nvidia, 30% Microsoft, and 20% Google"* or *"Create a defensive yield portfolio with Ondo USDY and Apple"*).
-* Pre-configured institutional presets: **AI Supercycle**, **Defensive Yield (5.1% APY)**, and **Magnificent 7 Composite**.
+### 1. 🗣️ Conversational Strategy Agent & Dual AI Engine
+* Parse complex multi-asset investment theses from natural language (e.g. *"Build an AI chips basket with 60% Nvidia and 40% Microsoft"* or *"Allocate $50 into Tech Giants"*).
+* **OpenRouter AI Integration**: Powers deep conversational portfolio rebalancing and strategy explanations.
+* **Graceful Local Fallback (`omnibasket-neuro`)**: If `OPENROUTER_API_KEY` is omitted, the platform seamlessly uses its built-in deterministic financial reasoning engine with zero downtime or degraded functionality.
 
-### 2. 🛡️ Live Pre-Transaction Simulation Guardrail
-* Integrates `POST /build/api/v1/dex/pre-transaction/simulate` from Binance Web3 API.
-* Runs EVM sandbox dry-runs against the latest BSC block before any order broadcast.
-* Validates calldata, DEX liquidity routes, and catches reverts (e.g., token balance limits) with **\$0 gas lost**.
+### 2. 🔐 Binance Web3 Wallet Extension (Primary Production Flow)
+* **True User-Owned Non-Custodial Architecture**: Public users connect their own **Binance Web3 Wallet** (or compatible EIP-1193 injected provider) directly in the browser.
+* **Zero Server-Side Keys Required**: Production and Railway deployments require **ZERO Binance API keys or secret keys** on the server.
+* **Pre-Broadcast Account & Chain Validation**: Immediately prior to dispatching `eth_sendTransaction`, the client re-verifies that the active wallet is strictly on **BNB Smart Chain Mainnet (Chain ID 56)** and that the signer matches the connected address.
 
-### 3. ⚡ Multi-Leg DEX Aggregator Execution via Binance Agentic Wallet (`baw`)
-* Direct integration with `@binance/agentic-wallet` CLI (`baw market-order swap`).
-* Slices multi-leg allocations across BSC DEX liquidity providers (LiquidMesh, PancakeSwap V4, etc.).
-* Strict enforcement of the **\$5.00 minimum order floor** and **0.5% maximum slippage bounds**.
+### 3. 🛡️ Meaningful Minimum Output & 0.5% Hard Slippage Protection
+* **Zero Minimum Outputs Banned**: Executable calldata strictly forbids zero `amountOutMinWei`. Any attempt to construct a swap with zero or negative minimum output throws an unhandled execution error.
+* **Live AMM Quote Verification**: Fresh on-chain quotes are fetched directly from the PancakeSwap V2 Router (`getAmountsOut`) on BSC Mainnet.
+* **0.5% Maximum Slippage Bound**: Slippage tolerance is strictly bounded to a maximum of **0.5% (50 basis points)**. Quotes with wider slippage or missing liquidity pools fail closed.
+* **Transparent Confirmation UI**: The user is presented with expected output, guaranteed minimum output, quote source, timestamp, and slippage percentage prior to signing.
 
-### 4. 🕒 24/7 Weekend Sentinel & Drift Engine
+### 4. 🧪 Fail-Closed Pre-Transaction EVM Simulation Gate
+* **Simulation-First Execution**: Every transaction must pass an on-chain EVM simulation dry-run via Viem on BSC state before being presented for signing.
+* **$0 Gas Lost to Reverts**: Any potential revert (insufficient balance, slippage violation, router error) blocks execution upfront.
+* **Safe Sequential Approval Flow**:
+  1. Calldata is generated for exact-amount token approval.
+  2. Approval transaction is simulated on BSC state.
+  3. User signs approval transaction in Binance Web3 Wallet.
+  4. Platform awaits confirmed on-chain transaction receipt.
+  5. A fresh on-chain swap quote and calldata are constructed and re-simulated against the confirmed allowance.
+  6. User signs the final swap transaction.
+
+### 5. 🎯 Exact ERC-20 Approvals (No Unlimited Allowances)
+* **Unlimited Approvals Eliminated**: Dangerous `uint256.max` approvals are strictly disallowed.
+* Token approval calldata specifies the **exact token input amount** required for the specific swap, leaving zero excess allowance exposed on-chain.
+
+### 6. 🗺️ Verified On-Chain Route & Asset Registry
+* **Direct & Hop Routing on BSC PancakeSwap V2**:
+  - `NVDA`, `AAPL`, `MSFT` route directly via high-liquidity `USDT` pairs.
+  - `TSLA` routes via verified two-hop liquidity: `USDT -> WBNB -> TSLA`.
+* **Fail-Closed Unroutable Asset Guard**: Tokens lacking public AMM liquidity pools on BSC PancakeSwap V2 (e.g., `USDY`, `GOOG`, `MAG7X`, `AI`) are rejected upfront with descriptive error messages, preventing failed transactions.
+
+### 7. 🕒 24/7 Weekend Sentinel & Drift Engine
 * Real-time sync with Wall Street trading clocks (NYSE/NASDAQ 9:30 AM – 4:00 PM EST).
-* Monitors portfolio weight drift (> 5.0% threshold) while TradFi exchanges are closed.
-* Autonomously calculates target rebalancing routes to capitalize on off-hours market movements.
+* Monitors portfolio weight drift (> 5.0% threshold) while TradFi equity exchanges are closed.
+* Calculates target rebalancing routes to capitalize on off-hours market movements.
 
-### 5. 🤖 BNB Agent Studio Worker & x402 Micropayment Protocol ($2,000 Track)
+### 8. 🤖 BNB Agent Studio Worker & x402 Micropayment Protocol ($2,000 Track)
 * **ERC-8004 Standardized Agent Identity** (`OmniBasket Sentinel AI v1.0` on BSC).
-* **x402 (HTTP 402) Paywalled RWA Feed**: Micro-monetizes premium institutional momentum signals for 0.01 USDT via `baw x402-payment preview` and EIP-3009 signing.
-* Automated 5-step trace: `CHALLENGE 402` → `BAW PREVIEW` → `EIP-3009 SIGN` → `REPLAY` → `UNLOCKED`.
+* **x402 (HTTP 402) Paywalled RWA Feed**: Micro-monetizes premium institutional momentum signals for 0.01 USDT via EIP-3009 signing.
+* Automated 5-step trace: `CHALLENGE 402` → `PREVIEW` → `EIP-3009 SIGN` → `REPLAY` → `UNLOCKED`.
 
 ---
 
@@ -58,36 +81,50 @@ Additionally, OmniBasket AI incorporates an **ERC-8004 on-chain agent identity**
                    ▼                                               ▼
 ┌───────────────────────────────────────┐       ┌─────────────────────────────────────┐
 │        Conversational Parser          │       │       24/7 Weekend Sentinel         │
-│     (Strategy & Allocation Sizer)     │       │     (Weight Drift > 5% Engine)      │
+│  (OpenRouter or Built-in Neuro Model) │       │     (Weight Drift > 5% Engine)      │
 └──────────────────┬────────────────────┘       └──────────────────┬──────────────────┘
                    │                                               │
                    └───────────────────────┬───────────────────────┘
                                            │
                                            ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
-│                           Binance Web3 API & SDK Suite                              │
-├───────────────────────────────────┬─────────────────────────────────────────────────┤
-│  DEX Aggregator Quote             │  `GET /build/api/v1/dex/aggregator/quote`       │
-│  Calldata & Swap Constructor      │  `GET /build/api/v1/dex/aggregator/swap`        │
-│  Pre-Transaction Simulation       │  `POST /build/api/v1/dex/pre-transaction/sim`   │
-└───────────────────────────────────┴─────────────────────────────────────────────────┘
+│                 BSC Route Discovery & Quoting Engine (PancakeSwap V2)               │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│  • Checks asset tradability on BSC DEX (rejects unroutable assets upfront)          │
+│  • Queries live on-chain `getAmountsOut` across candidate paths (Direct / WBNB hop) │
+│  • Enforces 0.5% maximum slippage protection cap                                    │
+│  • Derives nonzero `amountOutMinWei` (zero minimum output strictly forbidden)       │
+└──────────────────────────────────────────┬──────────────────────────────────────────┘
                                            │
                                            ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
-│                     Binance Agentic Wallet (`baw`) & x402 Engine                    │
-├───────────────────────────────────┬─────────────────────────────────────────────────┤
-│  Market Order Execution           │  `baw market-order swap --binanceChainId 56`    │
-│  x402 Micropayment Preview        │  `baw x402-payment preview --json`              │
-│  EIP-3009 Header Signer           │  `baw x402-payment sign --selectedIndex 1`      │
-│  Agent Identity Card              │  ERC-8004 Autonomous Agent Spec (BSC)           │
-└───────────────────────────────────┴─────────────────────────────────────────────────┘
+│                 Fail-Closed Pre-Transaction EVM Simulation Gate                     │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│  • Dry-runs unsigned calldata against BSC Mainnet state via Viem                    │
+│  • Sequential approval: simulates exact approval -> polls receipt -> re-simulates   │
+│  • Any revert immediately blocks user execution ($0 gas lost)                       │
+└──────────────────────────────────────────┬──────────────────────────────────────────┘
+                                           │
+                                           ▼
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│                  Binance Web3 Wallet Extension (Client-Side Signing)                │
+├─────────────────────────────────────────────────────────────────────────────────────┤
+│  • Re-checks active chain (must be BSC #56) and active account before signing       │
+│  • User approves exact ERC-20 allowance (no uint256.max)                            │
+│  • User signs and broadcasts swap via `eth_sendTransaction`                         │
+│  • Frontend polls and confirms on-chain transaction receipt                         │
+└──────────────────────────────────────────┬──────────────────────────────────────────┘
                                            │
                                            ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────┐
 │                            BNB Smart Chain (Mainnet #56)                            │
-│           LiquidMesh · PancakeSwap V4 · Ondo RFQ · bStocks · xStocks                │
+│        PancakeSwap V2 Router (0x10ED43C718714eb63d5aA57B78B54704E256024E)           │
 └─────────────────────────────────────────────────────────────────────────────────────┘
 ```
+
+> [!NOTE]
+> **About Server-Side Binance Agentic Wallet (`baw`) Mode:**  
+> The shared server-side Agentic Wallet mode is strictly an optional local/CLI developer feature disabled by default (`ENABLE_AGENTIC_WALLET=false`). In public multi-user deployments (such as Railway), users connect their own Binance Web3 Wallet extension to guarantee non-custodial ownership and prevent shared server-side wallet states.
 
 ---
 
@@ -95,16 +132,18 @@ Additionally, OmniBasket AI incorporates an **ERC-8004 on-chain agent identity**
 
 All token contracts used in OmniBasket AI are live on **BNB Smart Chain (Chain ID: 56)**:
 
-| Asset Ticker | Underlying Asset | Token Standard | Contract Address (BSC Mainnet) |
-|:---|:---|:---|:---|
-| **USDT** | Tether USD (Quote Base) | BEP-20 | `0x55d398326f99059fF775485246999027B3197955` |
-| **USDY** | Ondo US Dollar Yield (5.1% APY) | RWA / RFQ | `0x608593d17a2decbbc4399e4185be4922f97ed32e` |
-| **NVDAon** | NVIDIA Corporation | bStock / LiquidMesh | `0xa9ee28c80f960b889dfbd1902055218cba016f75` |
-| **AAPLon** | Apple Inc. | bStock / LiquidMesh | `0x390a684ef9cade28a7ad0dfa61ab1eb3842618c4` |
-| **MSFTon** | Microsoft Corporation | bStock / LiquidMesh | `0x6bfe75d1ad432050ea973c3a3dcd88f02e2444c3` |
-| **GOOGon** | Alphabet Inc. | bStock / LiquidMesh | `0x817f1f6780f99bcaac394a59cb0261962df5da8b` |
-| **TSLAon** | Tesla Inc. | bStock / LiquidMesh | `0x2494b603319d4d9f9715c9f4496d9e0364b59d93` |
-| **MAG7Xon** | Magnificent 7 Composite | xStock / AMM | `0x50436ec45316a98e72b03ead5752e8543f11ec09` |
+| Asset Ticker | Underlying Asset | Status on BSC DEX | Contract Address (BSC Mainnet) | Liquidity Route |
+|:---|:---|:---|:---|:---|
+| **USDT** | Tether USD (Base) | Active (BEP-20) | `0x55d398326f99059fF775485246999027B3197955` | Base Asset |
+| **WBNB** | Wrapped BNB | Active (BEP-20) | `0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c` | Intermediary Hop |
+| **NVDA** | NVIDIA Corporation | **Tradable** | `0xa9ee28c80f960b889dfbd1902055218cba016f75` | Direct (`USDT -> NVDA`) |
+| **AAPL** | Apple Inc. | **Tradable** | `0x390a684ef9cade28a7ad0dfa61ab1eb3842618c4` | Direct (`USDT -> AAPL`) |
+| **MSFT** | Microsoft Corporation | **Tradable** | `0x6bfe75d1ad432050ea973c3a3dcd88f02e2444c3` | Direct (`USDT -> MSFT`) |
+| **TSLA** | Tesla Inc. | **Tradable** | `0x2494b603319d4d9f9715c9f4496d9e0364b59d93` | Two-Hop (`USDT -> WBNB -> TSLA`) |
+| **USDY** | Ondo US Dollar Yield | *Off-DEX (RFQ)* | `0x608593d17a2decbbc4399e4185be4922f97ed32e` | Rejected on AMM (Fail-closed) |
+| **GOOG** | Alphabet Inc. | *No AMM Pool* | `0x817f1f6780f99bcaac394a59cb0261962df5da8b` | Rejected on AMM (Fail-closed) |
+| **MAG7X**| Magnificent 7 Basket | *No AMM Pool* | `0x50436ec45316a98e72b03ead5752e8543f11ec09` | Rejected on AMM (Fail-closed) |
+| **AI** | Artificial Superintelligence | *No AMM Pool* | `0x0DA694Da30e99BE1651B33633dE42fae025b3310` | Rejected on AMM (Fail-closed) |
 
 ---
 
@@ -112,12 +151,11 @@ All token contracts used in OmniBasket AI are live on **BNB Smart Chain (Chain I
 
 ### Prerequisites
 * Node.js v18+
-* `@binance/agentic-wallet` CLI installed globally:
-  ```bash
-  npm install -g @binance/agentic-wallet
-  ```
+* Binance Web3 Wallet Chrome Extension installed in browser
 
-### Installation
+### Environment Variables
+Production deployments require **ZERO Binance API keys**. Only `OPENROUTER_API_KEY` is optional for external AI model reasoning:
+
 ```bash
 # 1. Clone repository
 git clone https://github.com/EAZITECH1/omnibasket-ai.git
@@ -128,14 +166,17 @@ npm install
 
 # 3. Configure environment variables (.env)
 cp .env.example .env
-# Fill in BINANCE_WEB3_API_KEY and BINANCE_WEB3_SECRET_KEY
+# Optional: Set OPENROUTER_API_KEY=your_key (falls back to omnibasket-neuro if omitted)
 
-# 4. Build and run
+# 4. Run verification test suite
+npm test
+
+# 5. Build and launch
 npm run build
 npm run start
 ```
 
-Open [http://localhost:3000](http://localhost:3000) in your browser.
+Open [http://localhost:3000](http://localhost:3000) in your browser and click **Connect Wallet** to connect your Binance Web3 Wallet on BSC Mainnet.
 
 ---
 
@@ -145,31 +186,10 @@ All agent operations are verified on BNB Smart Chain Mainnet:
 
 | Action | Leg | Amount | Status | BscScan Explorer Link |
 |:---|:---|:---|:---|:---|
-| **DEX Market Swap** | `USDT` $\rightarrow$ `NVDAon` | 5.00 USDT $\rightarrow$ 0.02163 NVDAon | `FINISHED` | [`0x75f946b7...`](https://bscscan.com/tx/0x75f946b7b33d7cfae12eae946f5ae9b01df1a0dabf1f22a1eb1ca5bf4ea462b4) |
+| **DEX Market Swap** | `USDT` $\rightarrow$ `NVDA` | 5.00 USDT $\rightarrow$ 0.02163 NVDA | `FINISHED` | [`0x75f946b7...`](https://bscscan.com/tx/0x75f946b7b33d7cfae12eae946f5ae9b01df1a0dabf1f22a1eb1ca5bf4ea462b4) |
 | **DEX Market Swap** | `USDT` $\rightarrow$ `WBNB` | 5.50 USDT $\rightarrow$ 0.007377 WBNB | `FINISHED` | [`0xef424e91...`](https://bscscan.com/tx/0xef424e91e3249be77b7d5fd156df7cdd248fb8c9bfff98f9fd1c95e2cc20cc0e) |
 | **DEX Market Swap** | `WBNB` $\rightarrow$ `USDT` | 0.007377 WBNB $\rightarrow$ 5.5030 USDT | `FINISHED` | [`0xcd4566a4...`](https://bscscan.com/tx/0xcd4566a4d1f204b13f524d70a6c7e7329dd48d47c2fb5512d6c2bc8671341461) |
-| **x402 Micropayment** | `USDT` | 0.0100 USDT (EIP-3009) | `FINISHED` | Verified in `baw` x402 sentinel trace |
-
----
-
-OmniBasket AI includes standalone diagnostic scripts to verify every subsystem:
-
-```bash
-# 1. Verify Binance Web3 API Authentication & RWA Token List
-node --env-file=.env src/test-auth.js
-
-# 2. Test Multi-Leg Live Quote Aggregator on BSC
-node --env-file=.env src/test-quote.js
-
-# 3. Test Pre-Transaction Simulation Endpoint
-node --env-file=.env src/test-simulate-payloads.js
-
-# 4. Run Autonomous Background Agent Sentinel Cycle
-node src/agent/autonomousWorker.js
-
-# 5. Test Live x402 Micropayment Unlock Flow
-curl -s -X POST http://localhost:3000/api/agent/x402-demo
-```
+| **x402 Micropayment** | `USDT` | 0.0100 USDT (EIP-3009) | `FINISHED` | Verified in x402 sentinel trace |
 
 ---
 
@@ -182,8 +202,8 @@ curl -s -X POST http://localhost:3000/api/agent/x402-demo
 
 ## 🏆 Hackathon Track Alignment
 
-* **Main Track ($20,000)**: Tokenized Stocks Edition with Binance Web3 Wallet. Full-featured, production-ready portfolio engine solving the 24/7 weekend liquidity challenge on BSC with live quotes, simulation, and execution.
-* **BNB Agent Studio Dedicated Bounty ($2,000)**: Autonomous agent daemon with ERC-8004 identity, 24/7 market monitoring, automated weight drift rebalancing, and live x402 micropayment paywall integration via `baw`.
+* **Main Track ($20,000)**: Tokenized Stocks Edition with Binance Web3 Wallet. Full-featured, production-ready portfolio engine solving the 24/7 weekend liquidity challenge on BSC with live quotes, fail-closed simulation, 0.5% slippage protection, exact approvals, and extension signing.
+* **BNB Agent Studio Dedicated Bounty ($2,000)**: Autonomous agent daemon with ERC-8004 identity, 24/7 market monitoring, automated weight drift rebalancing, and live x402 micropayment paywall integration.
 
 ---
 

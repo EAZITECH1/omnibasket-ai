@@ -276,20 +276,35 @@ export function WalletProvider({ children }) {
     if (!address) {
       throw new Error('Please connect your Binance Web3 Wallet first.');
     }
-    if (chainId !== 56) {
-      throw new Error('Please switch network to BNB Smart Chain (Chain ID: 56).');
-    }
 
     const provider = activeProviderRef.current || getInjectedProvider();
     if (!provider) {
       throw new Error('No browser wallet extension provider found.');
     }
 
+    // Independently verify active wallet chain immediately before signing
+    const liveChainId = await checkChainId(provider);
+    if (liveChainId !== 56) {
+      setChainId(liveChainId || chainId);
+      throw new Error(`Transaction blocked: active wallet is on chain #${liveChainId || 'unknown'}. Must be BNB Smart Chain Mainnet (Chain ID 56).`);
+    }
+
+    // Independently verify active wallet account immediately before signing
+    const liveAccount = await checkActiveAccount(provider);
+    if (!liveAccount) {
+      setAddress(null);
+      throw new Error('Transaction blocked: wallet account is disconnected in extension.');
+    }
+    if (liveAccount.toLowerCase() !== address.toLowerCase()) {
+      setAddress(liveAccount);
+      throw new Error(`Transaction blocked: active account changed in extension (connected: ${address}, active: ${liveAccount}). Please re-verify.`);
+    }
+
     // Call eth_sendTransaction directly through the browser injected provider
     const txHash = await provider.request({
       method: 'eth_sendTransaction',
       params: [{
-        from: address,
+        from: liveAccount,
         to,
         data,
         value: value || '0x0'

@@ -1,10 +1,8 @@
-import crypto from 'crypto';
-import { BSC_RWA_TOKENS } from '../../../services/tokens.js';
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
 
-const API_KEY = process.env.BINANCE_WEB3_API_KEY;
-const SECRET_KEY = process.env.BINANCE_WEB3_SECRET_KEY;
-const BASE_URL = 'https://web3.binance.com/build';
-const hasBinanceApi = Boolean(API_KEY && SECRET_KEY);
+import { BSC_RWA_TOKENS } from '../../../services/tokens.js';
+import { getBscSwapQuote, MAX_SLIPPAGE_PERCENT } from '../../../services/bscRouter.js';
 
 export async function POST(req) {
   try {
@@ -14,122 +12,132 @@ export async function POST(req) {
     if (body.allocations && Array.isArray(body.allocations)) {
       const totalInvestment = Number(body.totalInvestment || body.depositAmount || 25);
       const results = {};
+      const fromToken = BSC_RWA_TOKENS.USDT.contractAddress;
 
       for (const alloc of body.allocations) {
         const targetToken = BSC_RWA_TOKENS[alloc.ticker];
         if (!targetToken) continue;
 
         const targetUsd = (totalInvestment * alloc.weight) / 100;
-        const estUnitPrice = alloc.ticker === 'NVDA' ? 230.93 : alloc.ticker === 'MSFT' ? 537.40 : alloc.ticker === 'AAPL' ? 232.10 : alloc.ticker === 'USDY' ? 1.05 : 180.00;
-        const estTokens = targetUsd / estUnitPrice;
+        if (targetToken.tradableOnBscDEX === false) {
+          results[alloc.ticker] = {
+            success: false,
+            ticker: alloc.ticker,
+            symbol: targetToken.symbol,
+            tradable: false,
+            error: targetToken.untradableReason || 'No verified AMM pool on BSC Mainnet'
+          };
+          continue;
+        }
 
-        results[alloc.ticker] = {
-          success: true,
-          ticker: alloc.ticker,
-          symbol: targetToken.symbol,
-          contractAddress: targetToken.contractAddress,
-          fromAmountUsd: targetUsd,
-          toAmountTokens: parseFloat(estTokens.toFixed(4)),
-          unitPriceUsd: estUnitPrice,
-          vendor: 'PancakeSwap / BSC AMM',
-          estimatedGas: '250000'
-        };
+        const amountInWei = BigInt(Math.floor(targetUsd * 1e18));
+        try {
+          const quote = await getBscSwapQuote({
+            fromTokenAddress: fromToken,
+            toTokenAddress: targetToken.contractAddress,
+            amountInWei: amountInWei > 0n ? amountInWei : 10000000000000000000n, // fallback to $10 for pricing
+            maxSlippagePercent: 0.5
+          });
+
+          if (quote.success) {
+            const outTokens = Number(quote.expectedAmountOutWei) / 1e18;
+            const unitPrice = outTokens > 0 ? (targetUsd / outTokens) : 0;
+            results[alloc.ticker] = {
+              success: true,
+              tradable: true,
+              ticker: alloc.ticker,
+              symbol: targetToken.symbol,
+              contractAddress: targetToken.contractAddress,
+              fromAmountUsd: targetUsd,
+              toAmountTokens: parseFloat(outTokens.toFixed(6)),
+              amountOutMinTokens: parseFloat((Number(quote.amountOutMinWei) / 1e18).toFixed(6)),
+              unitPriceUsd: parseFloat(unitPrice.toFixed(2)),
+              vendor: 'PancakeSwap V2 AMM (BSC #56)',
+              routePath: quote.path,
+              estimatedGas: '250000'
+            };
+          } else {
+            results[alloc.ticker] = {
+              success: false,
+              ticker: alloc.ticker,
+              symbol: targetToken.symbol,
+              tradable: false,
+              error: quote.error
+            };
+          }
+        } catch (err) {
+          results[alloc.ticker] = {
+            success: false,
+            ticker: alloc.ticker,
+            error: err.message
+          };
+        }
       }
 
       return Response.json({ success: true, quotes: results });
     }
 
-    const { ticker, amountUsd = 10, userWalletAddress } = body;
+    const ticker = body.ticker || body.toTicker;
+    const amountUsd = body.amountUsd !== undefined ? body.amountUsd : (body.fromAmount !== undefined ? body.fromAmount : 10);
+    const slippagePercent = body.slippagePercent !== undefined ? body.slippagePercent : (body.maxSlippagePercent || 0.5);
 
     const targetToken = BSC_RWA_TOKENS[ticker];
     if (!targetToken) {
       return Response.json({ success: false, error: `Unknown token ticker: ${ticker}` }, { status: 400 });
     }
 
+    if (targetToken.tradableOnBscDEX === false) {
+      return Response.json({
+        success: false,
+        ticker,
+        tradable: false,
+        tradableOnBscDEX: false,
+        error: targetToken.untradableReason || 'Asset has no active liquidity pool on BSC AMM.'
+      }, { status: 400 });
+    }
+
     const fromToken = BSC_RWA_TOKENS.USDT.contractAddress;
     const toToken = targetToken.contractAddress;
     const effectiveAmountUsd = Math.max(5, Number(amountUsd));
-    const amountBigInt = (BigInt(Math.floor(effectiveAmountUsd)) * 10n ** 18n).toString();
+    const amountInWei = BigInt(Math.floor(effectiveAmountUsd * 1e18));
 
-    // If Binance Web3 credentials are present, attempt live aggregator quote
-    if (hasBinanceApi) {
-      try {
-        const queryParams = new URLSearchParams({
-          binanceChainId: '56',
-          fromTokenAddress: fromToken,
-          toTokenAddress: toToken,
-          amount: amountBigInt,
-          userWalletAddress: userWalletAddress || '0x0000000000000000000000000000000000000001'
-        });
+    const boundedSlippage = Math.min(Math.max(Number(slippagePercent) || 0.5, 0.01), MAX_SLIPPAGE_PERCENT);
 
-        const timestamp = new Date().toISOString();
-        const requestPath = `/build/api/v1/dex/aggregator/quote?${queryParams.toString()}`;
-        const preHash = timestamp + 'GET' + requestPath + '';
+    const quote = await getBscSwapQuote({
+      fromTokenAddress: fromToken,
+      toTokenAddress: toToken,
+      amountInWei,
+      maxSlippagePercent: boundedSlippage
+    });
 
-        const signature = crypto
-          .createHmac('sha256', SECRET_KEY)
-          .update(preHash)
-          .digest('base64');
-
-        const url = `${BASE_URL}/api/v1/dex/aggregator/quote?${queryParams.toString()}`;
-
-        const res = await fetch(url, {
-          method: 'GET',
-          headers: {
-            'X-OC-APIKEY': API_KEY,
-            'X-OC-TIMESTAMP': timestamp,
-            'X-OC-SIGN': signature,
-            'Accept': 'application/json'
-          }
-        });
-
-        const data = await res.json();
-
-        if (data.code === 0 && data.data && data.data.length > 0) {
-          const best = data.data.find(r => r.isBest) || data.data[0];
-          const unitPrice = parseFloat(best.toToken?.tokenUnitPrice || (amountUsd / 150).toFixed(2));
-          
-          let toAmount = unitPrice > 0 ? (amountUsd / unitPrice) : 0;
-          if (toAmount === 0 || isNaN(toAmount)) {
-            const decimals = Number(best.toToken?.decimal || 18);
-            toAmount = Number(best.toTokenAmount) / (10 ** decimals);
-          }
-
-          return Response.json({
-            success: true,
-            ticker,
-            symbol: targetToken.symbol,
-            contractAddress: toToken,
-            quoteId: best.quoteId,
-            vendor: best.vendorName,
-            executionMode: best.executionMode,
-            fromAmountUsd: amountUsd,
-            toAmountTokens: parseFloat(toAmount.toFixed(4)),
-            unitPriceUsd: parseFloat(unitPrice.toFixed(2)),
-            estimatedGas: best.estimateGasFee,
-            dexRouters: best.dexRouterList?.map(r => r.dexProtocol?.dexName) || ['PancakeSwap']
-          });
-        }
-      } catch (_) {
-        // Fall back to calibrated on-chain pricing
-      }
+    if (!quote.success) {
+      return Response.json({
+        success: false,
+        ticker,
+        error: quote.error || 'Failed to obtain fresh on-chain quote.'
+      }, { status: 400 });
     }
 
-    // Default on-chain price calculation
-    const estUnitPrice = ticker === 'NVDA' ? 230.93 : ticker === 'MSFT' ? 537.40 : ticker === 'AAPL' ? 232.10 : ticker === 'USDY' ? 1.05 : 180.00;
-    const estTokens = amountUsd / estUnitPrice;
+    const toAmountTokens = Number(quote.expectedAmountOutWei) / 1e18;
+    const unitPrice = toAmountTokens > 0 ? (effectiveAmountUsd / toAmountTokens) : 0;
 
     return Response.json({
       success: true,
       ticker,
+      tradableOnBscDEX: true,
+      tradable: true,
       symbol: targetToken.symbol,
       contractAddress: toToken,
-      fromAmountUsd: amountUsd,
-      toAmountTokens: parseFloat(estTokens.toFixed(4)),
-      unitPriceUsd: estUnitPrice,
-      vendor: 'PancakeSwap / BSC AMM',
+      fromAmountUsd: effectiveAmountUsd,
+      toAmountTokens: parseFloat(toAmountTokens.toFixed(6)),
+      amountOutMinTokens: parseFloat((Number(quote.amountOutMinWei) / 1e18).toFixed(6)),
+      unitPriceUsd: parseFloat(unitPrice.toFixed(2)),
+      slippagePercent: boundedSlippage,
+      slippageBps: Math.round(boundedSlippage * 100),
+      vendor: quote.quoteSource,
+      routePath: quote.path,
       estimatedGas: '250000',
-      msg: 'Direct AMM route calculated'
+      quotedAt: quote.quotedAt
     });
   } catch (error) {
     return Response.json({ success: false, error: error.message }, { status: 500 });

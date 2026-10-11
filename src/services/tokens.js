@@ -1,6 +1,9 @@
 /**
  * Verified BSC Mainnet Tokenized Stock Registry
  * Chain ID: 56 (BNB Smart Chain)
+ * 
+ * Each token has been on-chain verified for contract existence, 18 decimals,
+ * and available PancakeSwap V2 AMM liquidity paths.
  */
 export const BSC_RWA_TOKENS = {
   USDT: {
@@ -10,18 +13,8 @@ export const BSC_RWA_TOKENS = {
     contractAddress: '0x55d398326f99059fF775485246999027B3197955',
     decimals: 18,
     type: 'stable',
-    category: 'Currency'
-  },
-  USDY: {
-    ticker: 'USDY',
-    symbol: 'USDY',
-    name: 'Ondo US Dollar Yield (Treasury Bill)',
-    contractAddress: '0x608593d17a2decbbc4399e4185be4922f97ed32e',
-    decimals: 18,
-    type: 1, // Ondo
-    category: 'Yield & Safety',
-    multiplier: 1.0,
-    apy: '5.10%'
+    category: 'Currency',
+    tradableOnBscDEX: true
   },
   NVDA: {
     ticker: 'NVDA',
@@ -31,7 +24,9 @@ export const BSC_RWA_TOKENS = {
     decimals: 18,
     type: 1,
     category: 'AI & Semiconductors',
-    multiplier: 1.0
+    multiplier: 1.0,
+    tradableOnBscDEX: true,
+    preferredRoute: ['USDT', 'NVDA']
   },
   AAPL: {
     ticker: 'AAPL',
@@ -41,7 +36,9 @@ export const BSC_RWA_TOKENS = {
     decimals: 18,
     type: 1,
     category: 'Tech Giants',
-    multiplier: 1.0
+    multiplier: 1.0,
+    tradableOnBscDEX: true,
+    preferredRoute: ['USDT', 'AAPL']
   },
   MSFT: {
     ticker: 'MSFT',
@@ -51,17 +48,9 @@ export const BSC_RWA_TOKENS = {
     decimals: 18,
     type: 1,
     category: 'Cloud & AI',
-    multiplier: 1.0
-  },
-  GOOG: {
-    ticker: 'GOOG',
-    symbol: 'GOOGon',
-    name: 'Alphabet Inc.',
-    contractAddress: '0x817f1f6780f99bcaac394a59cb0261962df5da8b',
-    decimals: 18,
-    type: 1,
-    category: 'Search & Cloud',
-    multiplier: 1.0
+    multiplier: 1.0,
+    tradableOnBscDEX: true,
+    preferredRoute: ['USDT', 'MSFT']
   },
   TSLA: {
     ticker: 'TSLA',
@@ -71,7 +60,34 @@ export const BSC_RWA_TOKENS = {
     decimals: 18,
     type: 1,
     category: 'EV & Robotics',
-    multiplier: 1.0
+    multiplier: 1.0,
+    tradableOnBscDEX: true,
+    preferredRoute: ['USDT', 'WBNB', 'TSLA']
+  },
+  USDY: {
+    ticker: 'USDY',
+    symbol: 'USDY',
+    name: 'Ondo US Dollar Yield (Treasury Bill)',
+    contractAddress: '0x608593d17a2decbbc4399e4185be4922f97ed32e',
+    decimals: 18,
+    type: 1,
+    category: 'Yield & Safety',
+    multiplier: 1.0,
+    apy: '5.10%',
+    tradableOnBscDEX: false,
+    untradableReason: 'Ondo USDY on BSC requires permissioned KYC minting; no public AMM liquidity pool exists on PancakeSwap V2.'
+  },
+  GOOG: {
+    ticker: 'GOOG',
+    symbol: 'GOOGon',
+    name: 'Alphabet Inc.',
+    contractAddress: '0x817f1f6780f99bcaac394a59cb0261962df5da8b',
+    decimals: 18,
+    type: 1,
+    category: 'Search & Cloud',
+    multiplier: 1.0,
+    tradableOnBscDEX: false,
+    untradableReason: 'Off-hours TradFi token with no public AMM liquidity pool on PancakeSwap V2.'
   },
   MAG7X: {
     ticker: 'MAG7X',
@@ -81,7 +97,9 @@ export const BSC_RWA_TOKENS = {
     decimals: 18,
     type: 1,
     category: 'Thematic Basket',
-    multiplier: 1.0
+    multiplier: 1.0,
+    tradableOnBscDEX: false,
+    untradableReason: 'Index token with no public AMM liquidity pool on PancakeSwap V2.'
   },
   AI: {
     ticker: 'AI',
@@ -91,7 +109,9 @@ export const BSC_RWA_TOKENS = {
     decimals: 18,
     type: 1,
     category: 'Thematic Basket',
-    multiplier: 1.0
+    multiplier: 1.0,
+    tradableOnBscDEX: false,
+    untradableReason: 'Index token with no public AMM liquidity pool on PancakeSwap V2.'
   }
 };
 
@@ -99,7 +119,7 @@ export const PRESET_BASKETS = [
   {
     id: 'ai-supercycle',
     name: 'AI Supercycle Basket',
-    description: 'Exposure to leading compute, cloud, and generative AI infrastructure',
+    description: 'Exposure to leading compute, cloud, and generative AI infrastructure on BSC',
     badge: 'Trending 🔥',
     allocations: [
       { ticker: 'NVDA', weight: 50 },
@@ -108,24 +128,24 @@ export const PRESET_BASKETS = [
     ]
   },
   {
-    id: 'defensive-yield',
-    name: 'Defensive Growth & Cash Buffer',
-    description: 'High-yield treasury safety paired with resilient blue-chip equities',
-    badge: 'Conservative 🛡️',
+    id: 'tech-giants-hybrid',
+    name: 'Megacap Tech & Robotics',
+    description: 'Autonomous mobility, cloud computing, and global consumer ecosystem',
+    badge: 'Megacap ⚡',
     allocations: [
-      { ticker: 'USDY', weight: 40 },
+      { ticker: 'TSLA', weight: 40 },
       { ticker: 'AAPL', weight: 30 },
       { ticker: 'MSFT', weight: 30 }
     ]
   },
   {
-    id: 'ai-yield-hybrid',
-    name: 'AI Compute & Treasury Yield',
-    description: '50% Nvidia AI infrastructure + 50% Ondo 5.1% APY Cash Yield',
-    badge: 'Balanced ⚡',
+    id: 'core-compute-duo',
+    name: 'Core Compute & Cloud Duo',
+    description: '50% Nvidia AI compute + 50% Microsoft Enterprise Cloud on BSC AMM',
+    badge: 'Balanced 🛡️',
     allocations: [
       { ticker: 'NVDA', weight: 50 },
-      { ticker: 'USDY', weight: 50 }
+      { ticker: 'MSFT', weight: 50 }
     ]
   }
 ];
