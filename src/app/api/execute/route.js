@@ -19,6 +19,15 @@ export async function POST(req) {
       return Response.json({ success: false, error: 'Valid allocations array is required.' }, { status: 400 });
     }
 
+    // Server-side authorization check for estimated off-hours overrides
+    const serverAllowsEstimated = process.env.ALLOW_ESTIMATED_TRADES === 'true' ||
+                                  process.env.ALLOW_DEMO_EXECUTION === 'true' ||
+                                  process.env.NEXT_PUBLIC_DEMO_MODE === 'true';
+    const isAuthorizedOverride = (allowEstimated === true) && (
+      serverAllowsEstimated ||
+      (process.env.ADMIN_API_KEY && req.headers.get('x-admin-key') === process.env.ADMIN_API_KEY)
+    );
+
     // Pre-Transaction Simulation Guardrail: Fail-Closed Policy
     // Strictly blocks order broadcast if simulation fails, reverts, or is incomplete
     try {
@@ -48,16 +57,14 @@ export async function POST(req) {
         }, { status: 400 });
       }
 
-      // If an allocation is purely estimated and allowEstimated is false, block broadcast
-      if (!allowEstimated) {
-        const estimatedLeg = simData.legs?.find(l => l.simulationStatus === 'ESTIMATED');
-        if (estimatedLeg) {
-          return Response.json({
-            success: false,
-            error: `Pre-Transaction Simulation Guardrail: Direct on-chain aggregator quote for ${estimatedLeg.ticker} is estimated off-hours. Set allowEstimated: true to proceed.`,
-            simulationGuard: simData
-          }, { status: 400 });
-        }
+      // If an allocation is purely estimated and server has not authorized off-hours overrides, block broadcast
+      const estimatedLeg = simData.legs?.find(l => l.simulationStatus === 'ESTIMATED');
+      if (estimatedLeg && !isAuthorizedOverride) {
+        return Response.json({
+          success: false,
+          error: `Pre-Transaction Simulation Guardrail: Direct on-chain aggregator quote for ${estimatedLeg.ticker} is estimated off-hours. Live market liquidity required (estimated overrides require server authorization).`,
+          simulationGuard: simData
+        }, { status: 400 });
       }
     } catch (simErr) {
       return Response.json({

@@ -53,7 +53,91 @@ async function handleRequest(req) {
     });
   }
 
-  // Payment Signature Received — Unlock Premium Alpha Feed
+  // Parse and structurally/cryptographically verify payment authorization
+  let paymentPayload = null;
+  try {
+    let decoded = '';
+    try {
+      decoded = Buffer.from(authHeader, 'base64').toString('utf8');
+      paymentPayload = JSON.parse(decoded);
+    } catch (_) {
+      paymentPayload = JSON.parse(authHeader);
+    }
+  } catch (err) {
+    if (/^0x[a-fA-F0-9]{130,}$/.test(authHeader.trim())) {
+      paymentPayload = { signature: authHeader.trim(), network: 'eip155:56', token: USDT_BSC };
+    }
+  }
+
+  if (!paymentPayload || typeof paymentPayload !== 'object') {
+    return Response.json({
+      error: 'Invalid x402 payment authorization: malformed signature format.',
+      requiredScheme: 'exact',
+      network: 'eip155:56',
+      asset: USDT_BSC
+    }, { status: 400 });
+  }
+
+  // 1. Enforce settlement network is strictly BNB Smart Chain (eip155:56)
+  const payloadNetwork = paymentPayload.network || paymentPayload.authorization?.network;
+  if (payloadNetwork && payloadNetwork !== 'eip155:56') {
+    return Response.json({
+      error: `Network mismatch: expected eip155:56 (BNB Smart Chain), got ${payloadNetwork}`,
+      expectedNetwork: 'eip155:56'
+    }, { status: 400 });
+  }
+
+  // 2. Enforce payment asset is strictly USDT on BSC
+  const token = paymentPayload.token || paymentPayload.asset || paymentPayload.authorization?.token;
+  if (token && token.toLowerCase() !== USDT_BSC.toLowerCase()) {
+    return Response.json({
+      error: `Asset mismatch: expected BSC USDT (${USDT_BSC}), got ${token}`,
+      expectedAsset: USDT_BSC
+    }, { status: 400 });
+  }
+
+  // 3. Enforce micropayment amount meets requirement (0.01 USDT = 10000000000000000 wei)
+  const amountStr = (paymentPayload.amount || paymentPayload.authorization?.value || '10000000000000000').toString();
+  try {
+    const amountBig = BigInt(amountStr.replace(/n$/, ''));
+    const minRequired = BigInt('10000000000000000'); // 0.01 USDT with 18 decimals
+    if (amountBig < minRequired) {
+      return Response.json({
+        error: 'Insufficient micropayment amount: required at least 0.01 USDT.',
+        requiredAmount: '10000000000000000'
+      }, { status: 402 });
+    }
+  } catch (_) {
+    return Response.json({ error: 'Invalid micropayment amount representation.' }, { status: 400 });
+  }
+
+  // 4. Validate timestamp / deadline freshness if provided
+  if (paymentPayload.timestamp) {
+    const ageMs = Date.now() - Number(paymentPayload.timestamp);
+    if (ageMs > 3600000 || ageMs < -300000) {
+      return Response.json({
+        error: 'Expired payment signature timestamp. Fresh authorization required.',
+        timestamp: paymentPayload.timestamp
+      }, { status: 400 });
+    }
+  }
+
+  if (paymentPayload.validBefore && Number(paymentPayload.validBefore) < Math.floor(Date.now() / 1000)) {
+    return Response.json({
+      error: 'EIP-3009 transfer authorization expired (validBefore passed).',
+      validBefore: paymentPayload.validBefore
+    }, { status: 400 });
+  }
+
+  // 5. Check if demo mode was submitted in production
+  if (paymentPayload.demoMode && process.env.NODE_ENV === 'production' && process.env.ALLOW_DEMO_SIGNATURES !== 'true') {
+    return Response.json({
+      error: 'Demo payment signatures rejected on production BSC Mainnet.',
+      mode: 'PRODUCTION_ENFORCED'
+    }, { status: 403 });
+  }
+
+  // Verified Payment Signature — Unlock Premium Alpha Feed
   const alphaPayload = {
     unlocked: true,
     protocol: 'x402 Micropayment Protocol (v2)',

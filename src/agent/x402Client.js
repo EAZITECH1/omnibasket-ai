@@ -7,12 +7,18 @@ const execFilePromise = util.promisify(execFile);
  * Autonomous x402 Micropayment Client
  * Consumes HTTP 402 paywalled endpoints, previews with `baw`, signs, and replays
  */
-export async function fetchWithX402Payment(targetUrl) {
+export async function fetchWithX402Payment(targetUrl, options = {}) {
   const trace = {
     targetUrl,
     startedAt: new Date().toISOString(),
     steps: []
   };
+
+  const isExplicitDemo = options.isDemo === true ||
+                         process.env.ALLOW_DEMO_SIGNATURES === 'true' || 
+                         process.env.NEXT_PUBLIC_DEMO_MODE === 'true' ||
+                         targetUrl?.includes('/demo') ||
+                         targetUrl?.includes('x402-demo');
 
   // Step 1: Initial Request (Expect HTTP 402)
   trace.steps.push({ step: 1, name: 'INITIAL_REQUEST', status: 'DISPATCHING' });
@@ -67,7 +73,15 @@ export async function fetchWithX402Payment(targetUrl) {
     data: previewResult?.data || previewResult
   });
 
-  const paymentId = previewResult?.data?.paymentId || '721677d8-3e8d-460d-b58e-fea3540d16bd';
+  let paymentId = previewResult?.data?.paymentId;
+  if (!paymentId) {
+    if (isExplicitDemo) {
+      paymentId = '721677d8-3e8d-460d-b58e-fea3540d16bd';
+    } else {
+      throw new Error(`baw x402-payment preview failed to generate paymentId on BSC: ${previewResult?.error?.message || 'Missing paymentId in CLI preview'}`);
+    }
+  }
+
   let paymentHeaderName = 'PAYMENT-SIGNATURE';
   let paymentHeaderValue = '';
 
@@ -85,10 +99,7 @@ export async function fetchWithX402Payment(targetUrl) {
       paymentHeaderValue = signResult.data.paymentHeaderValue;
     }
   } catch (err) {
-    const isDemoMode = process.env.NODE_ENV !== 'production' || 
-                       process.env.ALLOW_DEMO_SIGNATURES === 'true' ||
-                       targetUrl?.includes('/demo');
-    if (!isDemoMode) {
+    if (!isExplicitDemo) {
       throw new Error(`Production x402 signing failed via baw on BSC: ${err.message || 'Signature authorization rejected'}`);
     }
 
