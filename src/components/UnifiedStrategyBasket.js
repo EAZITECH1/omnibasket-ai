@@ -531,7 +531,7 @@ export default function UnifiedStrategyBasket() {
           throw new Error(`Approval simulation failed on BSC: ${buildData.simulation?.failReason || 'Revert'}. Execution aborted.`);
         }
 
-        const approveConfirmMsg = `Token Approval Required on BNB Smart Chain:\n\n• Token: ${fromTicker}\n• Spender: ${buildData.approveTx.spender} (PancakeSwap V2 Router)\n• Allowance: ${fromAmount} ${fromTicker} (Exact Order Amount, Non-Unlimited)\n• Pre-Simulation: SUCCESS (0 gas loss)\n\nApprove in your Binance Web3 Wallet?`;
+        const approveConfirmMsg = `Token Approval Required on BNB Smart Chain:\n\n• Token: ${fromTicker}\n• Spender: ${buildData.approveTx.spender} (PancakeSwap V2 Router)\n• Allowance: ${fromAmount} ${fromTicker} (Exact Order Amount, Non-Unlimited)\n• Pre-Simulation: SUCCESS (Verified against current BSC state)\n\nApprove in your Binance Web3 Wallet?`;
         if (!confirm(approveConfirmMsg)) {
           throw new Error('Token approval was cancelled by user.');
         }
@@ -545,8 +545,8 @@ export default function UnifiedStrategyBasket() {
 
         triggerSyncNotice(`Confirming token approval on BSC...`);
         const approveReceipt = await pollExtensionReceipt(provider, approveHash);
-        if (approveReceipt.status === 'REVERTED') {
-          throw new Error('Token approval transaction reverted on-chain.');
+        if (approveReceipt?.status !== 'CONFIRMED') {
+          throw new Error(`Token approval transaction was not confirmed on-chain (status: ${approveReceipt?.status || 'UNKNOWN'}). Execution blocked.`);
         }
 
         // Approval is confirmed on-chain! Fetch fresh build to re-quote and re-simulate swap with active allowance
@@ -576,7 +576,7 @@ export default function UnifiedStrategyBasket() {
 
       // 4. Quote Transparency Confirmation UI before prompting swap signature
       const quote = buildData.quote;
-      const swapConfirmMsg = `Confirm Trade on BNB Smart Chain (Chain ID 56):\n\n• Route: ${fromTicker} → ${toTicker}\n• Input: ${fromAmount} ${fromTicker}\n• Expected Output: ${quote?.expectedAmountOut || '...'} ${toTicker}\n• Minimum Guaranteed Output: ${quote?.amountOutMin || '...'} ${toTicker} (Slippage: max ${quote?.slippagePercent || 0.5}%)\n• Quote Source: ${quote?.quoteSource || 'PancakeSwap V2 AMM'}\n• Pre-Simulation: SUCCESS (Verified against live BSC state)\n\n${quote?.priceDisclaimer || 'Market prices fluctuate in real time.'}\n\nBroadcast swap via Binance Web3 Wallet?`;
+      const swapConfirmMsg = `Confirm Trade on BNB Smart Chain (Chain ID 56):\n\n• Route: ${fromTicker} → ${toTicker}\n• Input: ${fromAmount} ${fromTicker}\n• Expected Output: ${quote?.expectedAmountOut || '...'} ${toTicker}\n• Minimum Guaranteed Output: ${quote?.amountOutMin || '...'} ${toTicker} (Slippage: max ${quote?.slippagePercent || 0.5}%)\n• Quote Source: ${quote?.quoteSource || 'PancakeSwap V2 AMM'}\n• Pre-Simulation: SUCCESS (Verified against current BSC state)\n\n${quote?.priceDisclaimer || 'Market prices fluctuate in real time.'}\n\nBroadcast swap via Binance Web3 Wallet?`;
 
       if (!confirm(swapConfirmMsg)) {
         throw new Error('Swap was cancelled by user before signing.');
@@ -593,12 +593,12 @@ export default function UnifiedStrategyBasket() {
       // 6. Poll receipt
       triggerSyncNotice(`Polling transaction receipt on BSC...`);
       const receipt = await pollExtensionReceipt(provider, swapTxHash);
-      const isReverted = receipt.status === 'REVERTED';
+      const isConfirmed = receipt?.status === 'CONFIRMED';
       const bscScanUrl = `https://bscscan.com/tx/${swapTxHash}`;
 
       let replyMsg = '';
-      if (isReverted) {
-        replyMsg = `❌ **Swap REVERTED on BNB Smart Chain!**\n\n• **Tx Hash**: [${swapTxHash.slice(0, 10)}...${swapTxHash.slice(-8)}](${bscScanUrl})\n• **Error**: Transaction reverted on-chain. Slippage protection or gas limit prevented completion.`;
+      if (!isConfirmed) {
+        replyMsg = `❌ **Swap FAILED or REVERTED on BNB Smart Chain!**\n\n• **Status**: \`${receipt?.status || 'UNKNOWN'}\`\n• **Tx Hash**: [${swapTxHash.slice(0, 10)}...${swapTxHash.slice(-8)}](${bscScanUrl})\n• **Error**: Transaction was not confirmed on-chain.`;
       } else {
         replyMsg = `✅ **Swap CONFIRMED on BNB Smart Chain!**\n\n• **Transferred**: \`${fromAmount}\` **${fromTicker}** → **${toTicker}**\n• **Expected**: \`${quote?.expectedAmountOut}\` ${toTicker} (Min Guaranteed: \`${quote?.amountOutMin}\`)\n• **Slippage Cap**: \`${quote?.slippagePercent}%\`\n• **Tx Hash**: [${swapTxHash.slice(0, 10)}...${swapTxHash.slice(-8)}](${bscScanUrl})\n\nTokens are confirmed in your Binance Web3 Wallet on BSC Mainnet!`;
       }
@@ -610,8 +610,8 @@ export default function UnifiedStrategyBasket() {
               ...m,
               action: {
                 ...m.action,
-                status: isReverted ? 'FAILED' : 'COMPLETED',
-                executed: !isReverted,
+                status: !isConfirmed ? 'FAILED' : 'COMPLETED',
+                executed: isConfirmed,
                 executing: false,
                 txHash: swapTxHash,
                 receipt
@@ -766,9 +766,13 @@ export default function UnifiedStrategyBasket() {
         })
       });
       const data = await res.json();
-      if (data.success && data.overallStatus === 'PASS') {
+      if (data.success && (data.overallStatus === 'PASS' || data.overallStatus === 'APPROVAL_REQUIRED_FIRST')) {
         setSimulationResult(data);
-        triggerSyncNotice(`Simulation complete: 0 reverts on BSC #56`);
+        if (data.overallStatus === 'APPROVAL_REQUIRED_FIRST') {
+          triggerSyncNotice(`Simulation complete: Verified on BSC #56 (Token approval required before swap)`);
+        } else {
+          triggerSyncNotice(`Simulation complete: Verified on BSC #56`);
+        }
       } else {
         const revertLeg = data.legs?.find(l => l.simulationStatus === 'SIMULATED_REVERT');
         const failMsg = revertLeg ? `${revertLeg.ticker}: ${revertLeg.failReason}` : (data.error || 'Simulation failed on BSC');
@@ -810,7 +814,7 @@ export default function UnifiedStrategyBasket() {
     setExecutionResult(null);
 
     try {
-      // Step 1: Pre-Transaction Simulation Guardrail across all legs
+      // Step 1: Pre-Transaction Validation Guardrail across all legs
       const simRes = await fetch('/api/simulate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -878,7 +882,7 @@ export default function UnifiedStrategyBasket() {
               throw new Error(`Approval simulation failed for ${alloc.ticker}: ${buildData.simulation?.failReason || 'Revert'}`);
             }
 
-            const approveConfirm = confirm(`Approve token allowance for basket leg ${alloc.ticker}?\n\n• Token: USDT\n• Spender: ${buildData.approveTx.spender} (PancakeSwap Router)\n• Allowance: $${legUsd} USDT (Exact Order Amount, Non-Unlimited)\n• Pre-Simulation: SUCCESS\n\nApprove in your Binance Web3 Wallet?`);
+            const approveConfirm = confirm(`Approve token allowance for basket leg ${alloc.ticker}?\n\n• Token: USDT\n• Spender: ${buildData.approveTx.spender} (PancakeSwap Router)\n• Allowance: $${legUsd} USDT (Exact Order Amount, Non-Unlimited)\n• Pre-Simulation: SUCCESS (Verified against current BSC chain state)\n\nApprove in your Binance Web3 Wallet?`);
             if (!approveConfirm) {
               throw new Error(`Approval for ${alloc.ticker} cancelled by user.`);
             }
@@ -889,9 +893,11 @@ export default function UnifiedStrategyBasket() {
               data: buildData.approveTx.data,
               value: '0x0'
             });
+
+            triggerSyncNotice(`Confirming token approval on BSC...`);
             const approveReceipt = await pollExtensionReceipt(provider, approveHash);
-            if (approveReceipt.status === 'REVERTED') {
-              throw new Error(`Token approval reverted on-chain for ${alloc.ticker}`);
+            if (approveReceipt?.status !== 'CONFIRMED') {
+              throw new Error(`Token approval for ${alloc.ticker} was not confirmed on-chain (status: ${approveReceipt?.status || 'UNKNOWN'}). Execution blocked.`);
             }
 
             // Re-fetch build to re-quote and re-simulate swap with active on-chain allowance
@@ -915,11 +921,11 @@ export default function UnifiedStrategyBasket() {
 
           // Strict pre-transaction simulation check: must be SUCCESS
           if (buildData.simulation?.status !== 'SUCCESS') {
-            throw new Error(`Simulation failed for ${alloc.ticker}: ${buildData.simulation?.status} (${buildData.simulation?.failReason || 'Revert'})`);
+            throw new Error(`Simulation failed for ${alloc.ticker}: ${buildData.simulation?.status} (${buildData.simulation?.failReason || 'Revert'}). Execution aborted to prevent capital loss.`);
           }
 
           const quote = buildData.quote;
-          const legConfirm = confirm(`Broadcast swap for ${alloc.ticker}?\n\n• Input: $${legUsd} USDT\n• Expected Output: ${quote?.expectedAmountOut} ${alloc.ticker}\n• Minimum Guaranteed: ${quote?.amountOutMin} ${alloc.ticker} (Slippage: max ${quote?.slippagePercent}%)\n• Source: ${quote?.quoteSource}\n• Pre-Simulation: SUCCESS\n\n${quote?.priceDisclaimer}\n\nSign in your Binance Web3 Wallet?`);
+          const legConfirm = confirm(`Broadcast swap for ${alloc.ticker}?\n\n• Input: $${legUsd} USDT\n• Expected Output: ${quote?.expectedAmountOut} ${alloc.ticker}\n• Minimum Guaranteed: ${quote?.amountOutMin} ${alloc.ticker} (Slippage: max ${quote?.slippagePercent}%)\n• Source: ${quote?.quoteSource}\n• Pre-Simulation: SUCCESS (Verified against current BSC chain state)\n\nNote: Simulation reflects current chain state. Prices and pool reserves may fluctuate before block inclusion.\n\nSign in your Binance Web3 Wallet?`);
           if (!legConfirm) {
             throw new Error(`Swap for ${alloc.ticker} cancelled by user.`);
           }
@@ -935,13 +941,16 @@ export default function UnifiedStrategyBasket() {
           // Poll receipt
           triggerSyncNotice(`Confirming ${alloc.ticker} on BSC...`);
           const legReceipt = await pollExtensionReceipt(provider, swapHash);
-          const isConfirmed = legReceipt.status === 'CONFIRMED';
+          const isConfirmed = legReceipt?.status === 'CONFIRMED';
+          if (!isConfirmed) {
+            throw new Error(`Swap transaction for ${alloc.ticker} was not confirmed on-chain (status: ${legReceipt?.status || 'UNKNOWN'}).`);
+          }
 
           results.push({
             ticker: alloc.ticker,
             name: alloc.name || alloc.ticker,
-            status: isConfirmed ? 'CONFIRMED' : 'REVERTED',
-            success: isConfirmed,
+            status: 'CONFIRMED',
+            success: true,
             txHash: swapHash,
             bscScanUrl: `https://bscscan.com/tx/${swapHash}`,
             expectedAmountOut: quote?.expectedAmountOut,

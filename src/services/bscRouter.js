@@ -18,7 +18,8 @@ const ROUTER_ABI = parseAbi([
 
 const ERC20_ABI = parseAbi([
   'function approve(address spender, uint256 amount) returns (bool)',
-  'function allowance(address owner, address spender) view returns (uint256)'
+  'function allowance(address owner, address spender) view returns (uint256)',
+  'function balanceOf(address account) view returns (uint256)'
 ]);
 
 /**
@@ -251,6 +252,31 @@ export async function checkTokenAllowance({
     return allowance;
   } catch (err) {
     console.warn('Allowance check error:', err.message);
+    return 0n;
+  }
+}
+
+/**
+ * Checks current token balance on BSC
+ */
+export async function checkTokenBalance({
+  tokenAddress,
+  ownerAddress
+}) {
+  if (!isAddress(tokenAddress) || !isAddress(ownerAddress)) {
+    return 0n;
+  }
+  const client = getPublicBscClient();
+  try {
+    const balance = await client.readContract({
+      address: tokenAddress,
+      abi: ERC20_ABI,
+      functionName: 'balanceOf',
+      args: [ownerAddress]
+    });
+    return balance;
+  } catch (err) {
+    console.warn('Balance check error:', err.message);
     return 0n;
   }
 }

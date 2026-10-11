@@ -10,7 +10,7 @@
 
 **OmniBasket AI** is an autonomous portfolio creation, DCA, and 24/7 dynamic rebalancing agent built natively on **BNB Smart Chain (BSC Mainnet, Chain ID: 56)**.
 
-In traditional finance, equity markets close at 4:00 PM EST on Fridays, freezing trading for 64 continuous weekend hours. **OmniBasket AI bridges TradFi market hours and Web3's 24/7 liquidity**. Powered by the **Binance Web3 Wallet Extension**, **PancakeSwap V2 On-Chain Routing**, and **Fail-Closed Pre-Transaction EVM Simulation**, users manage tokenized stock baskets (`NVDA`, `AAPL`, `MSFT`, `TSLA`) via natural language prompts with verified on-chain execution, zero gas lost to reverts, and non-bypassable slippage protection.
+In traditional finance, equity markets close at 4:00 PM EST on Fridays, freezing trading for 64 continuous weekend hours. **OmniBasket AI bridges TradFi market hours and Web3's 24/7 liquidity**. Powered by the **Binance Web3 Wallet Extension**, **PancakeSwap V2 On-Chain Routing**, and **Fail-Closed Pre-Transaction EVM Simulation**, users manage tokenized stock baskets (`NVDA`, `AAPL`, `MSFT`, `TSLA`) via natural language prompts with verified on-chain execution, pre-flight revert protection against current chain state, and non-bypassable slippage protection.
 
 Additionally, OmniBasket AI incorporates an **ERC-8004 on-chain agent identity** and an **x402 (HTTP 402 Payment Required) micropayment protocol** to consume and monetize proprietary institutional RWA alpha signals on BSC.
 
@@ -35,15 +35,16 @@ Additionally, OmniBasket AI incorporates an **ERC-8004 on-chain agent identity**
 * **Transparent Confirmation UI**: The user is presented with expected output, guaranteed minimum output, quote source, timestamp, and slippage percentage prior to signing.
 
 ### 4. 🧪 Fail-Closed Pre-Transaction EVM Simulation Gate
-* **Simulation-First Execution**: Every transaction must pass an on-chain EVM simulation dry-run via Viem on BSC state before being presented for signing.
-* **$0 Gas Lost to Reverts**: Any potential revert (insufficient balance, slippage violation, router error) blocks execution upfront.
-* **Safe Sequential Approval Flow**:
-  1. Calldata is generated for exact-amount token approval.
+* **Simulation-First Execution**: Every transaction dry-runs against current BSC Mainnet state via Viem before being presented for signing.
+* **Pre-Flight Revert Protection**: Potential reverts (unsupported assets, slippage breaches, router errors, unverified allowances) are caught and blocked upfront against current chain conditions.
+* **Realistic Risk Disclosure**: Pre-transaction simulation verifies execution against current chain state rather than offering an absolute guarantee of zero gas loss; if on-chain state, pool reserves, or base balances shift between simulation and block inclusion, transactions can still revert and consume gas.
+* **Safe Sequential Approval Flow for Zero-Allowance Wallets**:
+  1. Calldata is generated for exact-amount token approval (no unlimited allowances).
   2. Approval transaction is simulated on BSC state.
   3. User signs approval transaction in Binance Web3 Wallet.
-  4. Platform awaits confirmed on-chain transaction receipt.
-  5. A fresh on-chain swap quote and calldata are constructed and re-simulated against the confirmed allowance.
-  6. User signs the final swap transaction.
+  4. Platform awaits confirmed on-chain transaction receipt (`status === 'CONFIRMED'`).
+  5. A fresh on-chain swap quote and calldata are constructed and re-simulated against the confirmed on-chain allowance.
+  6. User signs the final swap transaction only after swap simulation returns `SUCCESS`.
 
 ### 5. 🎯 Exact ERC-20 Approvals (No Unlimited Allowances)
 * **Unlimited Approvals Eliminated**: Dangerous `uint256.max` approvals are strictly disallowed.
@@ -102,7 +103,7 @@ Additionally, OmniBasket AI incorporates an **ERC-8004 on-chain agent identity**
 ├─────────────────────────────────────────────────────────────────────────────────────┤
 │  • Dry-runs unsigned calldata against BSC Mainnet state via Viem                    │
 │  • Sequential approval: simulates exact approval -> polls receipt -> re-simulates   │
-│  • Any revert immediately blocks user execution ($0 gas lost)                       │
+│  • Any revert immediately blocks broadcast against current BSC chain state         │
 └──────────────────────────────────────────┬──────────────────────────────────────────┘
                                            │
                                            ▼

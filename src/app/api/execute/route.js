@@ -48,7 +48,7 @@ export async function POST(req) {
       if (!simRes.ok) {
         return Response.json({
           success: false,
-          error: `Pre-Transaction Simulation Guardrail unavailable (HTTP ${simRes.status}). Broadcast blocked with $0 gas lost.`
+          error: `Pre-Transaction Simulation Guardrail unavailable (HTTP ${simRes.status}). Broadcast blocked against current chain state.`
         }, { status: 400 });
       }
 
@@ -59,7 +59,7 @@ export async function POST(req) {
       if (fatalRevert) {
         return Response.json({
           success: false,
-          error: `Pre-Transaction Simulation Guardrail Revert for ${fatalRevert.ticker}: ${fatalRevert.failReason || 'EVM execution reverted'}. Broadcast blocked with $0 gas lost.`,
+          error: `Pre-Transaction Simulation Guardrail Revert for ${fatalRevert.ticker}: ${fatalRevert.failReason || 'EVM execution reverted'}. Broadcast blocked against current chain state.`,
           simulationGuard: simData
         }, { status: 400 });
       }
@@ -76,7 +76,7 @@ export async function POST(req) {
     } catch (simErr) {
       return Response.json({
         success: false,
-        error: `Pre-Transaction Simulation Guardrail failure: ${simErr.message}. Broadcast blocked with $0 gas lost.`
+        error: `Pre-Transaction Simulation Guardrail failure: ${simErr.message}. Broadcast blocked against current chain state.`
       }, { status: 503 });
     }
 

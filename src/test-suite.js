@@ -13,6 +13,7 @@
  * 9. Exact-amount token approvals (rejection of unlimited uint256.max approvals)
  * 10. Route discovery & unroutable asset rejection (USDY, GOOG, MAG7X, AI)
  * 11. OpenRouter / Built-in deterministic AI engine functions cleanly
+ * 12. Zero-allowance basket execution, sequential approval-before-swap, and fail-closed guardrails
  */
 
 import { checkConfiguration } from './services/configCheck.js';
@@ -30,7 +31,8 @@ import {
   parseChainId, 
   getProviderInfo, 
   checkActiveAccount, 
-  checkChainId 
+  checkChainId,
+  pollExtensionReceipt
 } from './lib/wallet/provider.js';
 
 let passed = 0;
@@ -468,6 +470,277 @@ async function runTestSuite() {
     assert(Boolean(chatData.basket), '/api/chat parses basket synchronizations');
   } catch (err) {
     console.error('API Route test error:', err);
+    failed++;
+  }
+
+  // --------------------------------------------------------------------------
+  // TEST GROUP 9: Zero-Allowance Basket Execution & Sequential Guardrails Regression Suite
+  // --------------------------------------------------------------------------
+  console.log('\nTest Group 9: Zero-Allowance Basket Execution & Sequential Guardrails');
+  console.log('--- Part 9A: Live BSC RPC Preflight & Simulation (Live BSC #56 Node) ---');
+  try {
+    const { POST: simulateHandler } = await import('./app/api/simulate/route.js');
+    const { POST: buildHandler } = await import('./app/api/swap/build/route.js');
+
+    // Fresh address with zero USDT allowance on BSC
+    const freshZeroAllowanceUser = '0x1111111111111111111111111111111111111111';
+
+    // 1. [Live BSC RPC] Zero-allowance wallet preflight returns APPROVAL_REQUIRED_FIRST (not REVERT_BLOCKED)
+    const zeroAllowSimRes = await simulateHandler(new Request('http://localhost/api/simulate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        allocations: [{ ticker: 'NVDA', weight: 60 }, { ticker: 'MSFT', weight: 40 }],
+        depositAmount: 50,
+        userWalletAddress: freshZeroAllowanceUser
+      })
+    }));
+    const zeroAllowSimData = await zeroAllowSimRes.json();
+    assert(zeroAllowSimRes.status === 200, '[Live BSC RPC] /api/simulate returns HTTP 200 for new wallet with zero allowance');
+    assert(zeroAllowSimData.success === true, '[Live BSC RPC] /api/simulate reports success: true for zero-allowance wallet (does NOT falsely block)');
+    assert(zeroAllowSimData.overallStatus === 'APPROVAL_REQUIRED_FIRST', `[Live BSC RPC] /api/simulate status is APPROVAL_REQUIRED_FIRST: got ${zeroAllowSimData.overallStatus}`);
+    assert(zeroAllowSimData.legs.every(l => l.needsApproval === true), '[Live BSC RPC] /api/simulate correctly identifies all legs require token approval');
+    assert(zeroAllowSimData.legs.every(l => l.simulationStatus === 'APPROVAL_REQUIRED_FIRST'), '[Live BSC RPC] All tradable legs marked APPROVAL_REQUIRED_FIRST');
+    assert(zeroAllowSimData.legs.every(l => l.approvalStatus === 'SUCCESS'), '[Live BSC RPC] Approval calldata dry-run succeeds on live BSC state for each leg');
+
+    // 2. [Live BSC RPC] Untradable asset (USDY) in basket still fails closed with REVERT_BLOCKED
+    const untradableZeroSimRes = await simulateHandler(new Request('http://localhost/api/simulate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        allocations: [{ ticker: 'USDY', weight: 100 }],
+        depositAmount: 50,
+        userWalletAddress: freshZeroAllowanceUser
+      })
+    }));
+    const untradableZeroSimData = await untradableZeroSimRes.json();
+    assert(untradableZeroSimData.success === false, '[Live BSC RPC] /api/simulate fails closed (success: false) when basket contains untradable asset');
+    assert(untradableZeroSimData.overallStatus === 'REVERT_BLOCKED', '[Live BSC RPC] /api/simulate returns REVERT_BLOCKED for untradable asset');
+    assert(untradableZeroSimData.legs[0].simulationStatus === 'SIMULATED_REVERT', '[Live BSC RPC] Untradable leg is marked SIMULATED_REVERT');
+
+    // 3. [Live BSC RPC] /api/swap/build for zero-allowance wallet constructs exact approval calldata and pre-simulates approval
+    const buildZeroRes = await buildHandler(new Request('http://localhost/api/swap/build', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userWalletAddress: freshZeroAllowanceUser,
+        fromTicker: 'USDT',
+        toTicker: 'NVDA',
+        fromAmount: 10,
+        slippagePercent: '0.5'
+      })
+    }));
+    const buildZeroData = await buildZeroRes.json();
+    assert(buildZeroRes.status === 200, '[Live BSC RPC] /api/swap/build returns HTTP 200 for zero-allowance wallet');
+    assert(buildZeroData.needsApproval === true, '[Live BSC RPC] /api/swap/build flags needsApproval: true');
+    assert(Boolean(buildZeroData.approveTx), '[Live BSC RPC] /api/swap/build supplies exact approveTx calldata');
+    assert(buildZeroData.simulation?.status === 'SUCCESS', '[Live BSC RPC] /api/swap/build verifies approval pre-simulation on BSC');
+
+    console.log('\n--- Part 9B: Mocked Unit Tests — Client Execution Orchestrator & Guardrails (Isolated Mocks) ---');
+    
+    // Execution orchestrator replicating UnifiedStrategyBasket.handleExecuteBasket logic
+    async function runOrchestrationTest({
+      preflightStatus = 'APPROVAL_REQUIRED_FIRST',
+      preflightSuccess = true,
+      buildApprovals = [true],
+      approvalReceiptStatus = 'CONFIRMED',
+      swapSimulationStatus = 'SUCCESS',
+      swapReceiptStatus = 'CONFIRMED'
+    } = {}) {
+      const sentTxs = [];
+      let buildCallCount = 0;
+
+      const mockProvider = {
+        isBinance: true,
+        request: async ({ method, params }) => {
+          if (method === 'eth_chainId') return '0x38';
+          if (method === 'eth_accounts') return [freshZeroAllowanceUser];
+          if (method === 'eth_sendTransaction') {
+            const tx = params[0];
+            sentTxs.push(tx);
+            if (tx.data.startsWith('0x095ea7b3')) {
+              return '0xapproveHash123';
+            }
+            return '0xswapHash456';
+          }
+          if (method === 'eth_getTransactionReceipt') {
+            const hash = params[0];
+            if (hash === '0xapproveHash123') {
+              if (approvalReceiptStatus === 'CONFIRMED') return { status: '0x1', blockNumber: '0x100' };
+              if (approvalReceiptStatus === 'REVERTED') return { status: '0x0', blockNumber: '0x100' };
+              return null; // pending
+            }
+            if (hash === '0xswapHash456') {
+              if (swapReceiptStatus === 'CONFIRMED') return { status: '0x1', blockNumber: '0x101' };
+              if (swapReceiptStatus === 'REVERTED') return { status: '0x0', blockNumber: '0x101' };
+              return null; // pending
+            }
+            return null;
+          }
+          return null;
+        }
+      };
+
+      // Step 1: Preflight guard
+      if (!preflightSuccess || preflightStatus === 'REVERT_BLOCKED') {
+        return {
+          blockedAt: 'PREFLIGHT',
+          sentTxs,
+          error: 'Pre-transaction simulation guardrail blocked execution.'
+        };
+      }
+
+      // Step 2: Loop over legs (test 1 leg)
+      try {
+        buildCallCount++;
+        const needsApproval = buildApprovals[0];
+        
+        let buildData = {
+          success: true,
+          needsApproval,
+          approveTx: needsApproval ? {
+            to: usdtAddr,
+            spender: BSC_PANCAKE_ROUTER,
+            data: '0x095ea7b300000000000000000000000010ed43c718714eb63d5aa57b78b54704e256024e0000000000000000000000000000000000000000000000008ac7230489e80000'
+          } : null,
+          swapTx: {
+            to: BSC_PANCAKE_ROUTER,
+            data: '0x38ed173900000000000000000000000000000000',
+            value: '0x0'
+          },
+          simulation: { status: 'SUCCESS' },
+          quote: { expectedAmountOut: '0.042', amountOutMin: '0.041', slippagePercent: '0.5' }
+        };
+
+        if (buildData.needsApproval && buildData.approveTx) {
+          if (buildData.simulation?.status !== 'SUCCESS') {
+            throw new Error('Approval simulation failed');
+          }
+
+          // Send approval
+          const approveHash = await mockProvider.request({
+            method: 'eth_sendTransaction',
+            params: [{
+              to: buildData.approveTx.to,
+              data: buildData.approveTx.data,
+              value: '0x0'
+            }]
+          });
+
+          const approveReceipt = await pollExtensionReceipt(mockProvider, approveHash, 1, 10);
+          if (approveReceipt?.status !== 'CONFIRMED') {
+            throw new Error(`Token approval for NVDA was not confirmed on-chain (status: ${approveReceipt?.status || 'UNKNOWN'}). Execution blocked.`);
+          }
+
+          // Re-simulate swap with current allowance
+          buildCallCount++;
+          buildData = {
+            success: true,
+            needsApproval: false,
+            swapTx: {
+              to: BSC_PANCAKE_ROUTER,
+              data: '0x38ed173900000000000000000000000000000000',
+              value: '0x0'
+            },
+            simulation: { status: swapSimulationStatus, failReason: swapSimulationStatus === 'SUCCESS' ? null : 'Reverted on-chain' },
+            quote: { expectedAmountOut: '0.042', amountOutMin: '0.041', slippagePercent: '0.5' }
+          };
+        }
+
+        // Strict pre-transaction simulation check: must be SUCCESS
+        if (buildData.simulation?.status !== 'SUCCESS') {
+          throw new Error(`Simulation failed for NVDA: ${buildData.simulation?.status} (${buildData.simulation?.failReason || 'Revert'}). Execution aborted to prevent capital loss.`);
+        }
+
+        // Broadcast swap
+        const swapHash = await mockProvider.request({
+          method: 'eth_sendTransaction',
+          params: [{
+            to: buildData.swapTx.to,
+            data: buildData.swapTx.data,
+            value: '0x0'
+          }]
+        });
+
+        const swapReceipt = await pollExtensionReceipt(mockProvider, swapHash, 1, 10);
+        if (swapReceipt?.status !== 'CONFIRMED') {
+          throw new Error(`Swap transaction for NVDA was not confirmed on-chain (status: ${swapReceipt?.status || 'UNKNOWN'}).`);
+        }
+
+        return {
+          success: true,
+          sentTxs,
+          buildCallCount
+        };
+      } catch (err) {
+        return {
+          success: false,
+          sentTxs,
+          buildCallCount,
+          error: err.message
+        };
+      }
+    }
+
+    // 4. [Mocked Unit Test] Zero-allowance wallet executes approval BEFORE swap
+    const flowSuccess = await runOrchestrationTest({
+      preflightStatus: 'APPROVAL_REQUIRED_FIRST',
+      preflightSuccess: true,
+      buildApprovals: [true],
+      approvalReceiptStatus: 'CONFIRMED',
+      swapSimulationStatus: 'SUCCESS',
+      swapReceiptStatus: 'CONFIRMED'
+    });
+    assert(flowSuccess.success === true, '[Mocked Unit Test] Sequential execution succeeds for zero-allowance wallet');
+    assert(flowSuccess.sentTxs.length === 2, '[Mocked Unit Test] Exactly 2 transactions were broadcast (approve + swap)');
+    assert(flowSuccess.sentTxs[0].data.startsWith('0x095ea7b3'), '[Mocked Unit Test] Transaction 1 is ERC-20 approve()');
+    assert(flowSuccess.sentTxs[1].to.toLowerCase() === BSC_PANCAKE_ROUTER.toLowerCase(), '[Mocked Unit Test] Transaction 2 is PancakeSwap swap');
+    assert(flowSuccess.sentTxs[0].data.startsWith('0x095ea7b3') && flowSuccess.sentTxs[1].data.startsWith('0x38ed1739'), '[Mocked Unit Test] Approval strictly occurs BEFORE swap');
+
+    // 5. [Mocked Unit Test] Approval receipt REVERTED blocks swap (NO swap eth_sendTransaction)
+    const flowApproveRevert = await runOrchestrationTest({
+      preflightStatus: 'APPROVAL_REQUIRED_FIRST',
+      preflightSuccess: true,
+      buildApprovals: [true],
+      approvalReceiptStatus: 'REVERTED'
+    });
+    assert(flowApproveRevert.success === false, '[Mocked Unit Test] Execution fails closed when approval reverts');
+    assert(flowApproveRevert.error.includes('Token approval for NVDA was not confirmed on-chain (status: REVERTED)'), '[Mocked Unit Test] Reverted approval error is descriptive');
+    assert(flowApproveRevert.sentTxs.length === 1, '[Mocked Unit Test] Only 1 transaction was sent (the approval attempt)');
+    assert(!flowApproveRevert.sentTxs.some(tx => tx.to.toLowerCase() === BSC_PANCAKE_ROUTER.toLowerCase() && !tx.data.startsWith('0x095ea7b3')), '[Mocked Unit Test] NO eth_sendTransaction for swap occurred after approval reverted');
+
+    // 6. [Mocked Unit Test] Approval receipt PENDING (timeout) blocks swap (NO swap eth_sendTransaction)
+    const flowApprovePending = await runOrchestrationTest({
+      preflightStatus: 'APPROVAL_REQUIRED_FIRST',
+      preflightSuccess: true,
+      buildApprovals: [true],
+      approvalReceiptStatus: 'PENDING'
+    });
+    assert(flowApprovePending.success === false, '[Mocked Unit Test] Execution fails closed when approval receipt is pending/timeout');
+    assert(flowApprovePending.error.includes('status: PENDING'), '[Mocked Unit Test] Pending approval error identifies unconfirmed receipt');
+    assert(flowApprovePending.sentTxs.length === 1, '[Mocked Unit Test] Exactly 1 transaction sent; NO swap eth_sendTransaction dispatched');
+
+    // 7. [Mocked Unit Test] Swap simulation failure blocks swap (NO swap eth_sendTransaction)
+    const flowSwapRevert = await runOrchestrationTest({
+      preflightStatus: 'APPROVAL_REQUIRED_FIRST',
+      preflightSuccess: true,
+      buildApprovals: [true],
+      approvalReceiptStatus: 'CONFIRMED',
+      swapSimulationStatus: 'SIMULATED_REVERT'
+    });
+    assert(flowSwapRevert.success === false, '[Mocked Unit Test] Execution fails closed when post-approval swap simulation reverts');
+    assert(flowSwapRevert.error.includes('Simulation failed for NVDA: SIMULATED_REVERT'), '[Mocked Unit Test] Swap simulation failure triggers fail-closed error');
+    assert(flowSwapRevert.sentTxs.length === 1, '[Mocked Unit Test] Approval was sent, but NO swap eth_sendTransaction was dispatched');
+
+    // 8. [Mocked Unit Test] Preflight REVERT_BLOCKED blocks execution before ANY transaction is dispatched
+    const flowPreflightBlocked = await runOrchestrationTest({
+      preflightStatus: 'REVERT_BLOCKED',
+      preflightSuccess: false
+    });
+    assert(flowPreflightBlocked.blockedAt === 'PREFLIGHT', '[Mocked Unit Test] Preflight REVERT_BLOCKED halts before loop');
+    assert(flowPreflightBlocked.sentTxs.length === 0, '[Mocked Unit Test] ZERO transactions dispatched to provider when preflight reverts');
+  } catch (err) {
+    console.error('Test Group 9 error:', err);
     failed++;
   }
 

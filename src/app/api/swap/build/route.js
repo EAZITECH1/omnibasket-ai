@@ -184,7 +184,7 @@ export async function POST(req) {
         quoteSource: quote.quoteSource,
         quotedAt: quote.quotedAt,
         routePath: quote.path,
-        priceDisclaimer: 'Real-time AMM pricing on PancakeSwap V2. Market prices fluctuate; transaction will fail closed on-chain if minimum output is not met.'
+        priceDisclaimer: 'Real-time AMM pricing on PancakeSwap V2. Pre-transaction simulation verifies against current BSC state; changes in chain state before block inclusion may still cause transactions to revert.'
       }
     });
   } catch (error) {

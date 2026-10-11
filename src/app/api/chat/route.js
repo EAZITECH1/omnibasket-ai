@@ -834,7 +834,7 @@ Return ONLY valid JSON.`
     if (lower.includes('simulation') || lower.includes('dry run') || lower.includes('safety') || lower.includes('revert')) {
       return Response.json({
         type: 'INFO',
-        reply: `🛡️ **Pre-Transaction Simulation Guard**: OmniBasket AI calls Binance Web3's simulation endpoint (\`/dex/pre-transaction/simulate\`) to dry-run trades in an EVM sandbox against current BSC state before broadcasting. This guarantees zero-revert execution with **$0 gas lost**.`,
+        reply: `🛡️ **Pre-Transaction Simulation Guard**: OmniBasket AI dry-runs trades in an EVM sandbox against current BSC state before broadcasting to detect potential reverts prior to signing. Note: Simulation verifies execution against current chain state; it helps prevent avoidable reverts but does not guarantee zero gas loss if pool reserves or balances shift before block inclusion.`,
         marketStatus,
         modelUsed: 'OmniBasket Neuro ⚡'
       });
