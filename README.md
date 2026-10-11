@@ -16,6 +16,26 @@ Additionally, OmniBasket AI incorporates an **ERC-8004 on-chain agent identity**
 
 ---
 
+## 💎 Official Binance Web3 API Integration Matrix
+
+All integrated endpoints strictly follow the official BNB Chain Hackathon specifications:
+
+| Module | Exact Endpoint / Package | Purpose in OmniBasket AI |
+|:---|:---|:---|
+| **RWA Data** | `GET /api/v1/rwa/token/list` | Discover verified bStocks catalog & active BSC contract addresses |
+| **RWA Data** | `GET /api/v1/rwa/token/price` | Pull live on-chain spot prices for tokenized US equities |
+| **RWA Data** | `GET /api/v1/rwa/underlying/market-data` | Retrieve TradFi Friday close to compute 24/7 weekend spreads |
+| **RWA Data** | `GET /api/v1/rwa/underlying/info` | Ingest corporate metadata, CUSIP, and attestation proof |
+| **Trading API** | `GET /api/v1/dex/aggregator/quote` | Fetch optimal swap routes on BSC and obtain 30s `quoteId` |
+| **Trading API** | `GET /api/v1/dex/aggregator/swap` | Generate unsigned EVM swap payload (`to`, `data`, `value`) |
+| **Trading API** | `GET /api/v1/dex/aggregator/approve-transaction` | Construct conditional ERC-20 approval transaction |
+| **Transaction API** | `POST /api/v1/transaction/simulate` | Pre-flight EVM execution simulation to guarantee zero gas waste |
+| **Portfolio API** | `GET /api/v1/address/portfolio/overview` | Post-trade holdings, portfolio PnL, and allocation drift sync |
+| **Agentic Wallet** | `@binance/agentic-wallet (baw)` | Keyless MPC autonomous execution, daily quotas & guardrails |
+| **Agentic Protocol** | `x402 / B402 Protocol` | Autonomous micro-payments for pre-trade sentiment verification |
+
+---
+
 ## 🚀 Key Features
 
 ### 1. 🗣️ Conversational Strategy Agent & Dual AI Engine
