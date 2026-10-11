@@ -1,10 +1,10 @@
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import util from 'util';
 import { BSC_RWA_TOKENS, PRESET_BASKETS } from '../../../services/tokens';
 import { getMarketHoursStatus } from '../../../services/marketHours';
 import { ensureBawSession } from '../../../services/bawSession';
 
-const execPromise = util.promisify(exec);
+const execFilePromise = util.promisify(execFile);
 const USDT_ADDRESS = BSC_RWA_TOKENS.USDT.contractAddress;
 
 const TICKER_SYNONYMS = {
@@ -42,7 +42,7 @@ export async function POST(req) {
     // Helper to get real wallet state via Binance Agentic Wallet (baw)
     let liveWallet = { connected: false, usdtBal: 0, bnbBal: 0, heldStocks: [], tokens: [] };
     try {
-      const { stdout: balOut } = await execPromise('baw wallet balance --binanceChainId 56 --json');
+      const { stdout: balOut } = await execFilePromise('baw', ['wallet', 'balance', '--binanceChainId', '56', '--json']);
       const balParsed = JSON.parse(balOut);
       if (balParsed.success && Array.isArray(balParsed.data)) {
         const balList = balParsed.data;
@@ -273,8 +273,14 @@ export async function POST(req) {
             let estimatedUsdt = (parseFloat(targetStock.balance) * (parseFloat(targetStock.price) || 150)).toFixed(2);
 
             try {
-              const qCmd = `baw market-order quote --fromTokenQty ${targetStock.balance} --fromToken ${targetStock.address} --toToken ${USDT_ADDRESS} --binanceChainId 56 --json`;
-              const { stdout: qOut } = await execPromise(qCmd);
+              const { stdout: qOut } = await execFilePromise('baw', [
+                'market-order', 'quote',
+                '--fromTokenQty', targetStock.balance.toString(),
+                '--fromToken', targetStock.address,
+                '--toToken', USDT_ADDRESS,
+                '--binanceChainId', '56',
+                '--json'
+              ]);
               const qParsed = JSON.parse(qOut);
               if (qParsed.success && qParsed.data?.toCoinAmount) {
                 estimatedUsdt = parseFloat(qParsed.data.toCoinAmount).toFixed(2);

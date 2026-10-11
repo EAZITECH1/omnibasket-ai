@@ -1,8 +1,8 @@
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import util from 'util';
 import { BSC_RWA_TOKENS } from '../../../../services/tokens';
 
-const execPromise = util.promisify(exec);
+const execFilePromise = util.promisify(execFile);
 const USDT_ADDRESS = BSC_RWA_TOKENS.USDT.contractAddress;
 
 export async function POST(req) {
@@ -11,7 +11,7 @@ export async function POST(req) {
 
     // If specific token not provided, find any held stock/non-USDT asset
     if (!fromToken || !fromTokenQty) {
-      const { stdout: balOut } = await execPromise('baw wallet balance --binanceChainId 56 --json');
+      const { stdout: balOut } = await execFilePromise('baw', ['wallet', 'balance', '--binanceChainId', '56', '--json']);
       const balParsed = JSON.parse(balOut);
       const heldStock = balParsed.data?.find(t => 
         t.address.toLowerCase() !== USDT_ADDRESS.toLowerCase() &&
@@ -31,8 +31,24 @@ export async function POST(req) {
       fromSymbol = heldStock.symbol;
     }
 
-    const cmd = `baw market-order swap --fromTokenQty ${fromTokenQty} --fromToken ${fromToken} --toToken ${USDT_ADDRESS} --binanceChainId 56 --json`;
-    const { stdout: swapOut } = await execPromise(cmd);
+    const cleanQty = parseFloat(fromTokenQty);
+    if (isNaN(cleanQty) || cleanQty <= 0) {
+      return Response.json({ success: false, error: 'Invalid liquidation quantity.' }, { status: 400 });
+    }
+
+    const ADDR_REGEX = /^0x[a-fA-F0-9]{40}$/;
+    if (!ADDR_REGEX.test(fromToken)) {
+      return Response.json({ success: false, error: 'Invalid token address format.' }, { status: 400 });
+    }
+
+    const { stdout: swapOut } = await execFilePromise('baw', [
+      'market-order', 'swap',
+      '--fromTokenQty', cleanQty.toString(),
+      '--fromToken', fromToken,
+      '--toToken', USDT_ADDRESS,
+      '--binanceChainId', '56',
+      '--json'
+    ]);
     const swapParsed = JSON.parse(swapOut);
 
     if (!swapParsed.success || !swapParsed.data?.orderId) {
@@ -44,12 +60,12 @@ export async function POST(req) {
 
     const orderId = swapParsed.data.orderId;
 
-    // Poll for FINISHED status and txHash
+    // Poll for FINISHED status and txHash on BSC (#56)
     let finalOrder = null;
     for (let i = 0; i < 4; i++) {
       await new Promise(r => setTimeout(r, 1500));
       try {
-        const { stdout: listOut } = await execPromise('baw market-order list --json');
+        const { stdout: listOut } = await execFilePromise('baw', ['market-order', 'list', '--binanceChainId', '56', '--json']);
         const listParsed = JSON.parse(listOut);
         const found = listParsed.data?.list?.find(o => o.orderId === orderId);
         if (found) {

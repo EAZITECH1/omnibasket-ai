@@ -1,11 +1,11 @@
 export const dynamic = 'force-dynamic';
 
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import util from 'util';
 import { BSC_RWA_TOKENS } from '../../../../services/tokens';
 import { ensureBawSession } from '../../../../services/bawSession';
 
-const execPromise = util.promisify(exec);
+const execFilePromise = util.promisify(execFile);
 const USDT_ADDRESS = BSC_RWA_TOKENS.USDT.contractAddress;
 
 async function pollOrder(orderId, maxAttempts = 12, intervalMs = 1200) {
@@ -13,7 +13,7 @@ async function pollOrder(orderId, maxAttempts = 12, intervalMs = 1200) {
   for (let i = 0; i < maxAttempts; i++) {
     await new Promise(r => setTimeout(r, intervalMs));
     try {
-      const { stdout } = await execPromise('baw market-order list --binanceChainId 56 --json');
+      const { stdout } = await execFilePromise('baw', ['market-order', 'list', '--binanceChainId', '56', '--json']);
       const parsed = JSON.parse(stdout);
       const found = parsed.data?.list?.find(o => o.orderId === orderId);
       if (found) {
@@ -54,7 +54,7 @@ export async function POST(req) {
 
     // Auto-detect balance if fromTokenQty is not provided or 'ALL'
     if (!fromTokenQty || fromTokenQty === 'ALL') {
-      const { stdout: balOut } = await execPromise('baw wallet balance --binanceChainId 56 --json');
+      const { stdout: balOut } = await execFilePromise('baw', ['wallet', 'balance', '--binanceChainId', '56', '--json']);
       const balParsed = JSON.parse(balOut);
       const held = balParsed.data?.find(t => t.address.toLowerCase() === fromToken.contractAddress.toLowerCase());
       if (!held || parseFloat(held.balance || 0) <= 0) {
@@ -82,8 +82,14 @@ export async function POST(req) {
 
     // CASE 1: Direct Swap (One side is USDT)
     if (isExitToUsdt || isBuyFromUsdt) {
-      const cmd = `baw market-order swap --fromTokenQty ${fromTokenQty} --fromToken ${fromToken.contractAddress} --toToken ${toToken.contractAddress} --binanceChainId 56 --json`;
-      const { stdout: swapOut } = await execPromise(cmd);
+      const { stdout: swapOut } = await execFilePromise('baw', [
+        'market-order', 'swap',
+        '--fromTokenQty', fromTokenQty,
+        '--fromToken', fromToken.contractAddress,
+        '--toToken', toToken.contractAddress,
+        '--binanceChainId', '56',
+        '--json'
+      ]);
       const swapParsed = JSON.parse(swapOut);
 
       if (!swapParsed.success || !swapParsed.data?.orderId) {
@@ -117,8 +123,14 @@ export async function POST(req) {
 
     // CASE 2: Stock-to-Stock Rotation (Requires 2-hop via USDT since Ondo pairs require stablecoin)
     // Leg 1: fromToken -> USDT
-    const leg1Cmd = `baw market-order swap --fromTokenQty ${fromTokenQty} --fromToken ${fromToken.contractAddress} --toToken ${USDT_ADDRESS} --binanceChainId 56 --json`;
-    const { stdout: leg1Out } = await execPromise(leg1Cmd);
+    const { stdout: leg1Out } = await execFilePromise('baw', [
+      'market-order', 'swap',
+      '--fromTokenQty', fromTokenQty,
+      '--fromToken', fromToken.contractAddress,
+      '--toToken', USDT_ADDRESS,
+      '--binanceChainId', '56',
+      '--json'
+    ]);
     const leg1Parsed = JSON.parse(leg1Out);
 
     if (!leg1Parsed.success || !leg1Parsed.data?.orderId) {
@@ -141,8 +153,14 @@ export async function POST(req) {
     const intermediateUsdt = leg1Order.toTokenActualQty;
 
     // Leg 2: USDT -> toToken
-    const leg2Cmd = `baw market-order swap --fromTokenQty ${intermediateUsdt} --fromToken ${USDT_ADDRESS} --toToken ${toToken.contractAddress} --binanceChainId 56 --json`;
-    const { stdout: leg2Out } = await execPromise(leg2Cmd);
+    const { stdout: leg2Out } = await execFilePromise('baw', [
+      'market-order', 'swap',
+      '--fromTokenQty', intermediateUsdt,
+      '--fromToken', USDT_ADDRESS,
+      '--toToken', toToken.contractAddress,
+      '--binanceChainId', '56',
+      '--json'
+    ]);
     const leg2Parsed = JSON.parse(leg2Out);
 
     if (!leg2Parsed.success || !leg2Parsed.data?.orderId) {

@@ -1,11 +1,11 @@
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import util from 'util';
 import { BSC_RWA_TOKENS } from '../../../../services/tokens';
 
-const execPromise = util.promisify(exec);
+const execFilePromise = util.promisify(execFile);
 const USDT_ADDRESS = BSC_RWA_TOKENS.USDT.contractAddress;
 
 // In-memory cache for live price quotes (10 seconds TTL to ensure ultra-low latency & avoid CLI throttling)
@@ -37,8 +37,14 @@ export async function GET() {
     const results = await Promise.all(
       tickersToFetch.map(async (item) => {
         try {
-          const cmd = `baw market-order quote --fromTokenQty 5 --fromToken ${USDT_ADDRESS} --toToken ${item.address} --binanceChainId 56 --json`;
-          const { stdout } = await execPromise(cmd);
+          const { stdout } = await execFilePromise('baw', [
+            'market-order', 'quote',
+            '--fromTokenQty', '5',
+            '--fromToken', USDT_ADDRESS,
+            '--toToken', item.address,
+            '--binanceChainId', '56',
+            '--json'
+          ]);
           const data = JSON.parse(stdout);
 
           if (data.success && data.data && data.data.toCoinAmount) {

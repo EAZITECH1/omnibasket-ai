@@ -1,7 +1,7 @@
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import util from 'util';
 
-const execPromise = util.promisify(exec);
+const execFilePromise = util.promisify(execFile);
 
 /**
  * Autonomous x402 Micropayment Client
@@ -43,11 +43,14 @@ export async function fetchWithX402Payment(targetUrl) {
 
   // Step 2: Use Binance Agentic Wallet (`baw`) to preview payment options
   const reqStr = JSON.stringify(initialBody);
-  const previewCmd = `baw x402-payment preview --paymentRequirements '${reqStr.replace(/'/g, "'\\''")}' --json`;
 
   let previewResult = null;
   try {
-    const { stdout } = await execPromise(previewCmd);
+    const { stdout } = await execFilePromise('baw', [
+      'x402-payment', 'preview',
+      '--paymentRequirements', reqStr,
+      '--json'
+    ]);
     previewResult = JSON.parse(stdout);
   } catch (err) {
     if (err.stdout) {
@@ -68,17 +71,28 @@ export async function fetchWithX402Payment(targetUrl) {
   let paymentHeaderName = 'PAYMENT-SIGNATURE';
   let paymentHeaderValue = '';
 
-  // Step 3: Attempt Sign via `baw` or generate sandbox verified signature
+  // Step 3: Attempt Sign via `baw` or require explicit demo mode for fallback
   try {
-    const signCmd = `baw x402-payment sign --paymentId ${paymentId} --selectedIndex 1 --json`;
-    const { stdout } = await execPromise(signCmd);
+    const { stdout } = await execFilePromise('baw', [
+      'x402-payment', 'sign',
+      '--paymentId', paymentId,
+      '--selectedIndex', '1',
+      '--json'
+    ]);
     const signResult = JSON.parse(stdout);
     if (signResult.success && signResult.data?.paymentHeaderValue) {
       paymentHeaderName = signResult.data.paymentHeaderName;
       paymentHeaderValue = signResult.data.paymentHeaderValue;
     }
   } catch (err) {
-    // If balance is 0 or sandbox mode, formulate verified demonstration signature
+    const isDemoMode = process.env.NODE_ENV !== 'production' || 
+                       process.env.ALLOW_DEMO_SIGNATURES === 'true' ||
+                       targetUrl?.includes('/demo');
+    if (!isDemoMode) {
+      throw new Error(`Production x402 signing failed via baw on BSC: ${err.message || 'Signature authorization rejected'}`);
+    }
+
+    // Sandbox / demonstration fallback only: formulate clearly tagged demonstration signature
     const simSigPayload = {
       x402Version: 2,
       paymentId,
@@ -86,7 +100,8 @@ export async function fetchWithX402Payment(targetUrl) {
       token: '0x55d398326f99059fF775485246999027B3197955',
       amount: '10000000000000000',
       signedBy: '0x03A48c451B8cbE0bed6172eeaaE84a9B20505283',
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      demoMode: true
     };
     paymentHeaderValue = Buffer.from(JSON.stringify(simSigPayload)).toString('base64');
   }

@@ -1,16 +1,16 @@
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import util from 'util';
 import { ensureBawSession } from '../../../../services/bawSession';
 
-const execPromise = util.promisify(exec);
+const execFilePromise = util.promisify(execFile);
 
 export async function GET() {
   try {
     ensureBawSession();
-    const { stdout } = await execPromise('baw wallet balance --binanceChainId 56 --json');
+    const { stdout } = await execFilePromise('baw', ['wallet', 'balance', '--binanceChainId', '56', '--json']);
     const parsed = JSON.parse(stdout);
 
     if (parsed.success && parsed.data) {
