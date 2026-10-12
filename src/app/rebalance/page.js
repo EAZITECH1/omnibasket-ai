@@ -25,7 +25,7 @@ import {
 } from 'lucide-react';
 
 export default function RebalancePage() {
-  const { isConnected, address, walletMode, openModal, isBscMainnet, switchNetwork, sendExtensionTransaction, refreshBalances } = useWallet();
+  const { isConnected, address, walletMode, openModal, isBscMainnet, switchNetwork, sendExtensionTransaction, refreshBalances, balances } = useWallet();
   const [marketStatus, setMarketStatus] = useState(getMarketHoursStatus());
   const [selectedBasket, setSelectedBasket] = useState(PRESET_BASKETS[0]);
   const [rebalancing, setRebalancing] = useState(false);
@@ -48,6 +48,10 @@ export default function RebalancePage() {
   const fetchLiveBalancesAndPrices = useCallback(async () => {
     setLoadingBalances(true);
     try {
+      if (typeof refreshBalances === 'function') {
+        refreshBalances();
+      }
+
       // 1. Fetch live prices from RWA watchlist
       const priceRes = await fetch('/api/rwa/watchlist?t=' + Date.now(), { cache: 'no-store' });
       const priceData = await priceRes.json();
@@ -62,32 +66,58 @@ export default function RebalancePage() {
       // 2. Fetch live balances according to connected wallet mode
       let balData = null;
       if (walletMode === 'agentic') {
-        const bRes = await fetch('/api/agentic-wallet/balance?t=' + Date.now(), { cache: 'no-store' });
-        balData = await bRes.json();
+        try {
+          const bRes = await fetch('/api/agentic-wallet/balance?t=' + Date.now(), { cache: 'no-store' });
+          balData = await bRes.json();
+        } catch (_) {}
+
+        // If agentic session returned no tokens but address is available, query on-chain via address
+        const hasAgenticTokens = balData?.data?.balances?.length > 0 || balData?.tokens?.length > 0;
+        if (!hasAgenticTokens && address) {
+          try {
+            const bRes = await fetch(`/api/wallet/balance?address=${encodeURIComponent(address)}&t=` + Date.now(), { cache: 'no-store' });
+            balData = await bRes.json();
+          } catch (_) {}
+        }
       } else if (address) {
-        const bRes = await fetch(`/api/wallet/balance?address=${address}&t=` + Date.now(), { cache: 'no-store' });
-        balData = await bRes.json();
+        try {
+          const bRes = await fetch(`/api/wallet/balance?address=${encodeURIComponent(address)}&t=` + Date.now(), { cache: 'no-store' });
+          balData = await bRes.json();
+        } catch (_) {}
       }
 
-      if (balData?.success && Array.isArray(balData.tokens)) {
-        const usdtToken = balData.tokens.find(t => 
-          t.symbol?.toUpperCase() === 'USDT' || 
-          t.address?.toLowerCase() === BSC_RWA_TOKENS.USDT.contractAddress.toLowerCase()
+      // Extract token list from any valid API shape or WalletContext fallback
+      let rawTokenList = 
+        balData?.data?.balances || 
+        balData?.tokens || 
+        balData?.data?.tokens || 
+        (Array.isArray(balData?.data) ? balData.data : []);
+
+      if ((!rawTokenList || rawTokenList.length === 0) && balances?.tokens?.length > 0) {
+        rawTokenList = balances.tokens;
+      }
+
+      if (Array.isArray(rawTokenList) && rawTokenList.length > 0) {
+        const usdtToken = rawTokenList.find(t => 
+          (t.symbol || '').toUpperCase() === 'USDT' || 
+          (t.ticker || '').toUpperCase() === 'USDT' ||
+          (t.address && t.address.toLowerCase() === BSC_RWA_TOKENS.USDT.contractAddress.toLowerCase())
         );
         const usdtBal = parseFloat(usdtToken?.balance || 0);
 
         // Extract held stock assets
         const stockHoldings = [];
-        for (const token of balData.tokens) {
-          const sym = (token.symbol || '').replace(/on$/i, '').toUpperCase();
-          const isStock = BSC_RWA_TOKENS[sym] && sym !== 'USDT';
+        for (const token of rawTokenList) {
+          const rawSym = (token.ticker || token.symbol || '').toUpperCase();
+          const cleanSym = rawSym.replace(/ON$/i, '');
+          const isStock = BSC_RWA_TOKENS[cleanSym] && cleanSym !== 'USDT' && cleanSym !== 'BNB';
           const qty = parseFloat(token.balance || 0);
           if (isStock && qty > 0.000001) {
-            const price = priceMap[sym] || parseFloat(token.priceUsd || 0);
+            const price = priceMap[cleanSym] || parseFloat(token.priceUsd || 0);
             stockHoldings.push({
-              ticker: sym,
-              symbol: token.symbol,
-              name: BSC_RWA_TOKENS[sym]?.name || sym,
+              ticker: cleanSym,
+              symbol: token.symbol || `${cleanSym}on`,
+              name: BSC_RWA_TOKENS[cleanSym]?.name || token.name || cleanSym,
               balance: qty,
               priceUsd: price,
               valueUsd: parseFloat((qty * price).toFixed(2))
@@ -98,17 +128,18 @@ export default function RebalancePage() {
         setLiveBalances({
           usdtBal,
           stocks: stockHoldings,
-          rawTokens: balData.tokens
+          rawTokens: rawTokenList
         });
       } else {
-        setLiveBalances({ usdtBal: 0, stocks: [], rawTokens: [] });
+        const fallbackUsdt = parseFloat(balances?.usdt || 0);
+        setLiveBalances({ usdtBal: fallbackUsdt, stocks: [], rawTokens: [] });
       }
     } catch (err) {
       console.error('Failed to fetch live balances:', err);
     } finally {
       setLoadingBalances(false);
     }
-  }, [walletMode, address]);
+  }, [walletMode, address, refreshBalances, balances]);
 
   useEffect(() => {
     fetchLiveBalancesAndPrices();
@@ -394,10 +425,18 @@ export default function RebalancePage() {
                 <RefreshCw className={`w-3 h-3 ${loadingBalances ? 'animate-spin' : ''}`} />
                 <span>Refresh Live Balances</span>
               </button>
-              {address && (
+              {address ? (
                 <span className="font-mono text-xs text-muted-foreground border border-foreground/30 px-2 py-0.5">
                   {address.slice(0, 6)}...{address.slice(-4)} ({walletMode === 'agentic' ? 'Binance MPC Wallet' : 'Web3 Extension'})
                 </span>
+              ) : (
+                <button
+                  onClick={openModal}
+                  className="text-xs font-mono font-bold bg-bnb-yellow text-black border-2 border-foreground px-2.5 py-1 hover:bg-white transition-all shadow-[1px_1px_0px_0px_#fff] cursor-pointer flex items-center gap-1.5"
+                >
+                  <Wallet className="w-3 h-3" />
+                  <span>Connect Wallet</span>
+                </button>
               )}
             </div>
           </div>
@@ -425,6 +464,19 @@ export default function RebalancePage() {
                   {s.ticker}: {s.balance.toFixed(4)} (${s.valueUsd.toFixed(2)})
                 </span>
               ))}
+            </div>
+          ) : !address ? (
+            <div className="mt-4 pt-3 border-t border-foreground/10 text-xs font-mono text-amber-300 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5">
+                <AlertTriangle className="w-3.5 h-3.5 text-bnb-yellow" />
+                <span>Wallet not connected. Connect your Binance Web3 Wallet or pair Binance Agentic Wallet to view live on-chain balances.</span>
+              </div>
+              <button 
+                onClick={openModal}
+                className="underline text-bnb-yellow font-bold hover:text-white cursor-pointer whitespace-nowrap"
+              >
+                Connect Wallet →
+              </button>
             </div>
           ) : (
             <div className="mt-4 pt-3 border-t border-foreground/10 text-xs font-mono text-muted-foreground flex items-center gap-1.5">
