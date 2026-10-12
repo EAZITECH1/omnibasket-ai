@@ -50,3 +50,45 @@ export async function POST(req) {
     }, { status: 500 });
   }
 }
+
+export async function GET(req) {
+  try {
+    const url = new URL(req.url, 'http://localhost');
+    const targetAddress = url.searchParams.get('walletAddress') || '0x03A48c451B8cbE0bed6172eeaaE84a9B20505283';
+    const orderId = url.searchParams.get('orderId') || '26101200001960050013';
+
+    const { findActiveSessionByWallet } = await import('../../../../services/bawSessionStore.js');
+    const { callBinanceBapi } = await import('../../../../services/userBawSessionManager.js');
+
+    const session = await findActiveSessionByWallet(targetAddress);
+    if (!session || !session.agentSessionId) {
+      return Response.json({ success: false, error: 'No active session found for wallet ' + targetAddress }, { status: 404 });
+    }
+
+    let queryRes = await callBinanceBapi(
+      '/bapi/defi/v1/public/wallet-direct/web-dex/agent/batch-query-market-orders',
+      'POST',
+      { orderId, binanceChainId: '56', page: 1, pageSize: 10 },
+      session.agentSessionId,
+      session.clientId
+    );
+
+    if (!queryRes?.data?.data?.rows?.length) {
+      queryRes = await callBinanceBapi(
+        '/bapi/defi/v1/public/wallet-direct/web-dex/agent/batch-query-market-orders',
+        'POST',
+        { page: 1, pageSize: 10 },
+        session.agentSessionId,
+        session.clientId
+      );
+    }
+
+    return Response.json({
+      success: true,
+      orderId,
+      result: queryRes?.data
+    });
+  } catch (err) {
+    return Response.json({ success: false, error: err.message }, { status: 500 });
+  }
+}

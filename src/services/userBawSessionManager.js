@@ -168,7 +168,7 @@ export function extractEvmAddressFromBinance(obj) {
 /**
  * Call Binance Gateway BAPI directly with ephemeral client credentials
  */
-async function callBinanceBapi(endpoint, method = 'GET', body = null, agentSessionId = null, clientId = null) {
+export async function callBinanceBapi(endpoint, method = 'GET', body = null, agentSessionId = null, clientId = null) {
   const cId = clientId || crypto.randomUUID();
   const postData = body ? JSON.stringify(body) : '';
 
