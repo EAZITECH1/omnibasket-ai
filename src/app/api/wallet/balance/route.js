@@ -6,6 +6,7 @@ import util from 'util';
 import { isAddress } from 'viem';
 import { ensureBawSession } from '../../../../services/bawSession.js';
 import { readBscBalances } from '../../../../services/bscBalanceReader.js';
+import { getBalance } from '../../../../services/userBawSessionManager.js';
 
 const execFilePromise = util.promisify(execFile);
 
@@ -23,12 +24,31 @@ export async function GET(req) {
       return Response.json(onchainData);
     }
 
-    // 2. If no address passed, check if Agentic mode is explicitly enabled
+    // 2. Check per-user Agentic Wallet session via cookie
+    try {
+      const userBal = await getBalance(req);
+      if (userBal && userBal.success) {
+        const tokenList = userBal.data?.balances || userBal.tokens || [];
+        if (userBal.data?.walletAddress || tokenList.length > 0) {
+          return Response.json({
+            success: true,
+            mode: 'baw-session',
+            address: userBal.data?.walletAddress || null,
+            network: 'BNB Smart Chain (BSC)',
+            chainId: 56,
+            totalValueUsd: userBal.data?.totalValueUsd || 0,
+            tokens: tokenList
+          });
+        }
+      }
+    } catch (_) {}
+
+    // 3. If no address passed and no session, check if shared Agentic mode is explicitly enabled
     const isAgenticEnabled = process.env.ENABLE_AGENTIC_WALLET === 'true';
     if (!isAgenticEnabled) {
       return Response.json({ 
         success: false, 
-        error: 'Agentic Wallet unavailable in public mode. Connect your browser extension to view balances.' 
+        error: 'Agentic Wallet unavailable in public mode. Connect your browser extension or pair your Binance Agentic Wallet to view balances.' 
       }, { status: 503 });
     }
 

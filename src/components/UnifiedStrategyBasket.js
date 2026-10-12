@@ -558,25 +558,37 @@ export default function UnifiedStrategyBasket() {
         const fromTicker = action.fromTicker || 'USDT';
         const toTicker = action.toTicker;
         const isSell = action.mode === 'REVERSE_EXIT_TO_USDT' || toTicker === 'USDT';
+        const isRotation = action.mode === 'STOCK_TO_STOCK_ROTATION' || (fromTicker !== 'USDT' && toTicker !== 'USDT');
 
-        const payload = isSell
-          ? {
-              mode: 'REVERSE_EXIT_TO_USDT',
-              fromTicker: fromTicker,
-              toTicker: 'USDT',
-              fromQty: action.fromQty || fromAmount,
-              investmentAmount: 0,
-              allocations: [{ ticker: 'USDT', fromTicker: fromTicker, amount: action.fromQty || fromAmount, weight: 100 }],
-              chainId: 56
-            }
-          : {
-              mode: 'BUY_FROM_USDT',
-              fromTicker: 'USDT',
-              toTicker: toTicker,
-              investmentAmount: fromAmount,
-              allocations: [{ ticker: toTicker, weight: 100 }],
-              chainId: 56
-            };
+        let payload;
+        if (isRotation) {
+          payload = {
+            mode: 'STOCK_TO_STOCK_ROTATION',
+            fromTicker,
+            toTicker,
+            fromQty: action.fromQty || fromAmount,
+            chainId: 56
+          };
+        } else if (isSell) {
+          payload = {
+            mode: 'REVERSE_EXIT_TO_USDT',
+            fromTicker: fromTicker,
+            toTicker: 'USDT',
+            fromQty: action.fromQty || fromAmount,
+            investmentAmount: 0,
+            allocations: [{ ticker: 'USDT', fromTicker: fromTicker, amount: action.fromQty || fromAmount, weight: 100 }],
+            chainId: 56
+          };
+        } else {
+          payload = {
+            mode: 'BUY_FROM_USDT',
+            fromTicker: 'USDT',
+            toTicker: toTicker,
+            investmentAmount: fromAmount,
+            allocations: [{ ticker: toTicker, weight: 100 }],
+            chainId: 56
+          };
+        }
 
         const execRes = await fetch('/api/agentic-wallet/execute-basket', {
           method: 'POST',
@@ -599,21 +611,23 @@ export default function UnifiedStrategyBasket() {
         if (finalTxHash) {
           setExecutingSwap(false);
           setActiveActionIdx(null);
-          triggerSyncNotice(isSell ? `Sold ${fromTicker} on BSC!` : `Acquired ${toTicker} on BSC!`);
+          triggerSyncNotice(isRotation ? `Rotated ${fromTicker} → ${toTicker} on BSC!` : isSell ? `Sold ${fromTicker} on BSC!` : `Acquired ${toTicker} on BSC!`);
         } else {
           // Keep active execution indicators alive so reconcileOrders background poller continues
           setExecutingSwap(true);
           setActiveActionIdx(actionMsgIdx);
-          triggerSyncNotice(isSell ? `Sell order broadcasted on BSC...` : `Swap order broadcasted on BSC...`);
+          triggerSyncNotice(isRotation ? `Rotation order broadcasted on BSC...` : isSell ? `Sell order broadcasted on BSC...` : `Swap order broadcasted on BSC...`);
         }
 
         window.dispatchEvent(new Event('omnibasket-balance-refresh'));
         refreshBalances();
         fetchQuotes();
 
-        const replyContent = isSell
-          ? `✅ **Sell Order ${finalTxHash ? 'Executed' : 'Submitted'} on BNB Smart Chain!**\n\n• **Sold**: \`${action.fromQty || fromAmount}\` **${fromTicker}** → **USDT**\n• **Status**: \`${finalTxHash ? 'FINISHED' : (execData.statusDisplay || 'SUBMITTED')}\`\n• **Order ID**: \`${orderId || 'BSC-DEX'}\`\n• **Transaction**: ${finalTxHash ? `[${finalTxHash.slice(0, 10)}...${finalTxHash.slice(-8)}](https://bscscan.com/tx/${finalTxHash})` : 'Processing on BSC'}\n\nProceeds are confirmed in your Binance MPC Wallet under 0.5% slippage protection.`
-          : `✅ **Swap ${finalTxHash ? 'Executed' : 'Submitted'} via Binance Agentic Wallet!**\n\n• Swapped **$${fromAmount} USDT** for **${toTicker}**\n• Status: \`${finalTxHash ? 'FINISHED' : (acquired?.status || 'SUBMITTED')}\`\n• Order ID: \`${orderId || 'BSC-DEX'}\`\n• Transaction: ${finalTxHash ? `[${finalTxHash.slice(0, 10)}...${finalTxHash.slice(-8)}](https://bscscan.com/tx/${finalTxHash})` : 'Processing on BSC'}\n\nExecuted under strict 0.5% slippage protection.`;
+        const replyContent = isRotation
+          ? `✅ **Rotation ${finalTxHash ? 'Executed' : 'Submitted'} on BNB Smart Chain!**\n\n• **Rotated**: \`${action.fromQty || fromAmount}\` **${fromTicker}** → **${toTicker}**\n• **Status**: \`${finalTxHash ? 'FINISHED' : (execData.statusDisplay || 'SUBMITTED')}\`\n• **Order ID**: \`${orderId || 'BSC-DEX'}\`\n• **Transaction**: ${finalTxHash ? `[${finalTxHash.slice(0, 10)}...${finalTxHash.slice(-8)}](https://bscscan.com/tx/${finalTxHash})` : 'Processing on BSC'}\n\nRebalanced under strict 0.5% slippage protection.`
+          : isSell
+            ? `✅ **Sell Order ${finalTxHash ? 'Executed' : 'Submitted'} on BNB Smart Chain!**\n\n• **Sold**: \`${action.fromQty || fromAmount}\` **${fromTicker}** → **USDT**\n• **Status**: \`${finalTxHash ? 'FINISHED' : (execData.statusDisplay || 'SUBMITTED')}\`\n• **Order ID**: \`${orderId || 'BSC-DEX'}\`\n• **Transaction**: ${finalTxHash ? `[${finalTxHash.slice(0, 10)}...${finalTxHash.slice(-8)}](https://bscscan.com/tx/${finalTxHash})` : 'Processing on BSC'}\n\nProceeds are confirmed in your Binance MPC Wallet under 0.5% slippage protection.`
+            : `✅ **Swap ${finalTxHash ? 'Executed' : 'Submitted'} via Binance Agentic Wallet!**\n\n• Swapped **$${fromAmount} USDT** for **${toTicker}**\n• Status: \`${finalTxHash ? 'FINISHED' : (acquired?.status || 'SUBMITTED')}\`\n• Order ID: \`${orderId || 'BSC-DEX'}\`\n• Transaction: ${finalTxHash ? `[${finalTxHash.slice(0, 10)}...${finalTxHash.slice(-8)}](https://bscscan.com/tx/${finalTxHash})` : 'Processing on BSC'}\n\nExecuted under strict 0.5% slippage protection.`;
 
         setMessages(prev => {
           const updated = prev.map((m, idx) => {

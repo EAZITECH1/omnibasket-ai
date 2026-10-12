@@ -1,21 +1,58 @@
 import { execFile } from 'child_process';
 import util from 'util';
 import { BSC_RWA_TOKENS } from '../../../../services/tokens.js';
+import { executeBasketAutonomous, getBalance } from '../../../../services/userBawSessionManager.js';
 
 const execFilePromise = util.promisify(execFile);
 const USDT_ADDRESS = BSC_RWA_TOKENS.USDT.contractAddress;
 
 export async function POST(req) {
+  const body = await req.json().catch(() => ({}));
+  let { fromToken, fromTokenQty, fromSymbol } = body;
+
+  // 1. Try per-user authenticated Binance Agentic session
+  try {
+    let resolvedTicker = fromSymbol || fromToken;
+    let resolvedQty = fromTokenQty;
+
+    if (!resolvedTicker || !resolvedQty) {
+      const userBal = await getBalance(req);
+      const held = userBal?.data?.balances?.find(t => 
+        t.address?.toLowerCase() !== USDT_ADDRESS.toLowerCase() &&
+        t.symbol !== 'USDT' &&
+        t.address?.toLowerCase() !== '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' &&
+        parseFloat(t.balance || 0) > 0.000001
+      );
+      if (held) {
+        resolvedTicker = held.symbol?.replace(/on$/i, '') || held.symbol;
+        resolvedQty = held.balance;
+      }
+    }
+
+    if (resolvedTicker && resolvedQty) {
+      const userExec = await executeBasketAutonomous(req, {
+        mode: 'REVERSE_EXIT_TO_USDT',
+        fromTicker: resolvedTicker,
+        fromQty: resolvedQty,
+        investmentAmount: 0,
+        allocations: [{ ticker: 'USDT', fromTicker: resolvedTicker, amount: resolvedQty, weight: 100 }],
+        chainId: 56
+      });
+      if (userExec && userExec.code !== 'WALLET_NOT_CONNECTED' && userExec.code !== 'SESSION_REQUIRED') {
+        return Response.json(userExec, { status: userExec.status || 200 });
+      }
+    }
+  } catch (_) {}
+
   const isAgenticEnabled = process.env.ENABLE_AGENTIC_WALLET === 'true';
   if (!isAgenticEnabled) {
     return Response.json({
       success: false,
-      error: 'Shared Agentic Wallet liquidation is disabled in public mode. Please execute trades using your connected browser extension.'
+      error: 'Shared Agentic Wallet liquidation is disabled in public mode. Please execute trades using your connected browser extension or pair your Binance Agentic Wallet.'
     }, { status: 503 });
   }
 
   try {
-    let { fromToken, fromTokenQty, fromSymbol } = await req.json().catch(() => ({}));
 
     // If specific token not provided, find any held stock/non-USDT asset
     if (!fromToken || !fromTokenQty) {

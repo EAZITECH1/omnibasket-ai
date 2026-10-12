@@ -155,13 +155,91 @@ export async function POST(req) {
       !lower.includes('swap') && !lower.includes('rotate');
 
     if (isRebalanceQuery) {
+      const heldStocks = liveWallet.heldStocks || [];
+      const livePrices = await getLivePrices();
+
+      if (heldStocks.length > 0) {
+        // Calculate holdings values
+        const stockHoldings = heldStocks.map(s => {
+          const sym = s.symbol.replace(/on$/i, '').toUpperCase();
+          const p = livePrices[sym] || (liveWallet.tokens?.find(t => t.symbol === s.symbol)?.priceUsd) || 100;
+          const qty = parseFloat(s.balance);
+          return {
+            ticker: sym,
+            symbol: s.symbol,
+            balance: qty,
+            priceUsd: p,
+            valueUsd: qty * p
+          };
+        });
+
+        const totalStockVal = stockHoldings.reduce((sum, h) => sum + h.valueUsd, 0);
+        const driftList = calculateDrift(stockHoldings, PRESET_BASKETS[0].allocations, totalStockVal);
+        const overweight = driftList.find(d => d.driftPercent > 5);
+        const underweight = driftList.find(d => d.driftPercent < -5);
+
+        // If user wants to execute rebalance and we have an overweight and underweight asset:
+        if ((lower.includes('execute') || lower.includes('do it') || lower.includes('fix') || lower.includes('run') || lower.includes('rebalance')) && overweight && underweight) {
+          const fromTicker = overweight.ticker;
+          const toTicker = underweight.ticker;
+          const rotateUsd = Math.min(Math.abs(overweight.deltaUsd), 10);
+          const fromPrice = livePrices[fromTicker] || 100;
+          const fromQty = parseFloat((rotateUsd / fromPrice).toFixed(6));
+          const toPrice = livePrices[toTicker] || 100;
+          const estimatedOut = parseFloat((rotateUsd / toPrice).toFixed(6));
+
+          return Response.json({
+            type: 'TRADE_PROPOSAL',
+            reply: `⚖️ **24/7 Drift Sentinel: Rebalancing Route Identified**:\n\n• **Overweight Position**: **${fromTicker}** (+${overweight.driftPercent}% drift)\n• **Underweight Position**: **${toTicker}** (${underweight.driftPercent}% drift)\n• **Rebalance Action**: Swap \`${fromQty}\` **${fromTicker}** → **${toTicker}** (~$${rotateUsd.toFixed(2)} USDT value)\n• **Protection**: Strict 0.5% max slippage with MEV shielding\n\nClick below to execute this live rebalancing trade on BNB Smart Chain Mainnet:`,
+            action: {
+              type: 'EXECUTE_SWAP',
+              mode: 'STOCK_TO_STOCK_ROTATION',
+              fromTicker,
+              toTicker,
+              fromQty,
+              estimatedOutput: estimatedOut,
+              slippagePercent: '0.5',
+              status: 'PROPOSED',
+              executedAt: Date.now()
+            },
+            marketStatus,
+            modelUsed: 'OmniBasket Neuro ⚡'
+          });
+        }
+      }
+
+      // If user holds only USDT and asks to execute rebalance / allocate into basket
+      if (liveWallet.usdtBal >= 5 && (lower.includes('execute') || lower.includes('invest') || lower.includes('allocate') || lower.includes('do it'))) {
+        const allocAmt = (detectedDepositAmount && detectedDepositAmount >= 5 && detectedDepositAmount <= liveWallet.usdtBal)
+          ? detectedDepositAmount
+          : Math.min(25, Math.floor(liveWallet.usdtBal));
+
+        return Response.json({
+          type: 'TRADE_PROPOSAL',
+          reply: `⚖️ **24/7 Smart DCA Rebalancing Engine**:\n\nYour wallet holds **$${liveWallet.usdtBal.toFixed(2)} USDT**. To establish your target benchmark basket and activate continuous 24/7 drift tracking:\n\n• **Target Basket**: **AI Supercycle** (70% NVDA / 30% MSFT)\n• **Order Size**: **$${allocAmt.toFixed(2)} USDT**\n• **Slippage Cap**: **0.5% max**\n\nClick below to execute live allocation on BNB Smart Chain Mainnet:`,
+          action: {
+            type: 'EXECUTE_SWAP',
+            mode: 'BUY_FROM_USDT',
+            fromTicker: 'USDT',
+            toTicker: 'NVDA',
+            fromQty: allocAmt,
+            estimatedOutput: (allocAmt / (livePrices.NVDA || 229)).toFixed(4),
+            slippagePercent: '0.5',
+            status: 'PROPOSED',
+            executedAt: Date.now()
+          },
+          marketStatus,
+          modelUsed: 'OmniBasket Neuro ⚡'
+        });
+      }
+
       const stockDesc = liveWallet.heldStocks.length > 0
         ? `Your active on-chain positions: ${liveWallet.heldStocks.map(s => `${s.symbol} (${parseFloat(s.balance).toFixed(4)})`).join(', ')}.`
         : `Your connected wallet holds **$${liveWallet.usdtBal.toFixed(2)} USDT** with no drifting equity positions.`;
 
       return Response.json({
         type: 'INFO',
-        reply: `⚖️ **24/7 Drift Sentinel & Rebalance Engine**:\n\n• **Status**: Active monitoring across BSC Mainnet\n• **Drift Sensitivity**: Flags any position deviating **>5%** from target weight\n• **Portfolio State**: ${stockDesc}\n\nTo view real-time drift gauges and execute zero-revert rebalancing routes, visit the **[24/7 Rebalance](/rebalance)** dashboard!`,
+        reply: `⚖️ **24/7 Drift Sentinel & Rebalance Engine**:\n\n• **Status**: Active monitoring across BSC Mainnet (Chain ID 56)\n• **Drift Sensitivity**: Flags any position deviating **>5%** from target weight\n• **Portfolio State**: ${stockDesc}\n\nTo view real-time drift gauges and execute zero-revert rebalancing routes, visit the **[24/7 Rebalance](/rebalance)** dashboard, or say **"Execute rebalance"** to balance your active positions now!`,
         marketStatus,
         modelUsed: 'OmniBasket Neuro ⚡'
       });

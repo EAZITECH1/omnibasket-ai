@@ -1,22 +1,36 @@
 import { execFile } from 'child_process';
 import util from 'util';
 import { BSC_RWA_TOKENS } from '../../../services/tokens.js';
+import { executeBasketAutonomous } from '../../../services/userBawSessionManager.js';
 
 const execFilePromise = util.promisify(execFile);
 const USDT_ADDRESS = BSC_RWA_TOKENS.USDT.contractAddress;
 
 export async function POST(req) {
+  const body = await req.json().catch(() => ({}));
+  const { allocations, depositAmount = 25, allowEstimated = false } = body;
+
+  // 1. Try per-user authenticated Binance Agentic session
+  try {
+    const userExec = await executeBasketAutonomous(req, {
+      investmentAmount: depositAmount,
+      allocations: allocations,
+      chainId: 56
+    });
+    if (userExec && userExec.code !== 'WALLET_NOT_CONNECTED' && userExec.code !== 'SESSION_REQUIRED') {
+      return Response.json(userExec, { status: userExec.status || 200 });
+    }
+  } catch (_) {}
+
   const isAgenticEnabled = process.env.ENABLE_AGENTIC_WALLET === 'true';
   if (!isAgenticEnabled) {
     return Response.json({
       success: false,
-      error: 'Server-side Agentic Wallet execution is disabled in public mode. Please execute trades using Binance Web3 Wallet extension with browser signing.'
+      error: 'Server-side Agentic Wallet execution is disabled in public mode. Please execute trades using Binance Web3 Wallet extension with browser signing or connect your Binance Agentic Wallet.'
     }, { status: 503 });
   }
 
   try {
-    const body = await req.json().catch(() => ({}));
-    const { allocations, depositAmount = 25, allowEstimated = false } = body;
 
     const cleanDeposit = parseFloat(depositAmount);
     if (isNaN(cleanDeposit) || cleanDeposit < 5) {

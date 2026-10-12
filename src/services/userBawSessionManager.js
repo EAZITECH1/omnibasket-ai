@@ -1245,6 +1245,239 @@ export async function executeBasketAutonomous(req, body = {}) {
     }
   }
 
+  // Check if this is a stock-to-stock rotation (e.g. MSFT -> NVDA)
+  const isRotation = body.mode === 'STOCK_TO_STOCK_ROTATION' ||
+    (body.fromTicker && body.fromTicker !== 'USDT' && body.toTicker && body.toTicker !== 'USDT');
+
+  if (isRotation) {
+    const fromTicker = (body.fromTicker || (allocations && allocations[0]?.fromTicker) || 'NVDA').toUpperCase();
+    const toTicker = (body.toTicker || (allocations && allocations[0]?.ticker) || 'MSFT').toUpperCase();
+    const sellQtyRaw = body.fromQty || (allocations && allocations[0]?.amount) || body.investmentAmount;
+    const sellQty = parseFloat(sellQtyRaw);
+
+    if (isNaN(sellQty) || sellQty <= 0) {
+      return {
+        success: false,
+        status: 400,
+        code: 'INVALID_PARAMETERS',
+        error: 'Invalid source token quantity for stock rotation trade.'
+      };
+    }
+
+    const sourceTokenAddr = BSC_RWA_TOKENS[fromTicker]?.contractAddress || body.fromToken;
+    const targetTokenAddr = BSC_RWA_TOKENS[toTicker]?.contractAddress || body.toToken;
+    const usdtAddress = BSC_RWA_TOKENS.USDT.contractAddress;
+
+    if (!sourceTokenAddr || !targetTokenAddr) {
+      return {
+        success: false,
+        status: 400,
+        code: 'INVALID_PARAMETERS',
+        error: `Unknown contract address for assets ${fromTicker} or ${toTicker}.`
+      };
+    }
+
+    if (!session.agentSessionId) {
+      return {
+        success: false,
+        status: 503,
+        code: 'AUTONOMOUS_TRADING_UNAVAILABLE',
+        error: 'Binance Agentic session token is not active. Please re-pair your wallet to enable autonomous execution.',
+        walletAddress: session.walletAddress
+      };
+    }
+
+    try {
+      // Leg 1: Sell fromTicker -> USDT
+      const isOndo1 = BSC_RWA_TOKENS[fromTicker]?.type === 1 || Boolean(BSC_RWA_TOKENS[fromTicker]?.symbol?.endsWith('on'));
+      const endpoint1 = isOndo1
+        ? '/bapi/defi/v1/public/wallet-direct/web-dex/agent/ondo/place-order'
+        : '/bapi/defi/v1/public/wallet-direct/web-dex/agent/place-order';
+
+      const leg1Payload = {
+        binanceChainId: '56',
+        fromToken: sourceTokenAddr,
+        toToken: usdtAddress,
+        amount: String(sellQty),
+        slippage: 'auto',
+        tokenShare: String(sellQty),
+        multiplier: 1.0,
+        mev: true,
+        gasLevel: 'MEDIUM'
+      };
+
+      let leg1Res = await callBinanceBapi(
+        endpoint1,
+        'POST',
+        leg1Payload,
+        session.agentSessionId,
+        session.clientId
+      );
+
+      if (isOndo1 && (!leg1Res?.data || leg1Res.data.code !== '000000')) {
+        const fallback1 = await callBinanceBapi(
+          '/bapi/defi/v1/public/wallet-direct/web-dex/agent/place-order',
+          'POST',
+          leg1Payload,
+          session.agentSessionId,
+          session.clientId
+        );
+        if (fallback1?.data?.code === '000000') leg1Res = fallback1;
+      }
+
+      const res1 = leg1Res?.data;
+      if (!res1 || res1.code !== '000000' || !res1.data?.orderId) {
+        return {
+          success: false,
+          status: 400,
+          code: 'ORDER_SUBMISSION_REJECTED',
+          error: `Rotation Leg 1 (${fromTicker} → USDT) rejected: ${res1?.message || res1?.error || 'Order failed'}`
+        };
+      }
+
+      const orderId1 = res1.data.orderId;
+      let txHash1 = res1.data.txHash || res1.data.transactionHash || res1.data.orderTxId || null;
+      let orderStatus1 = 'SUBMITTED';
+      let usdtAcquired = 0;
+
+      for (let attempt = 0; attempt < 8; attempt++) {
+        try {
+          await new Promise(r => setTimeout(r, 1500));
+          const queryRes = await callBinanceBapi(
+            '/bapi/defi/v1/public/wallet-direct/web-dex/agent/batch-query-market-orders',
+            'POST',
+            { orderId: orderId1, binanceChainId: '56', page: 1, pageSize: 1 },
+            session.agentSessionId,
+            session.clientId
+          );
+          const row = queryRes?.data?.data?.rows?.[0];
+          if (row) {
+            orderStatus1 = row.status || orderStatus1;
+            if (row.orderTxId || row.txHash || row.transactionHash) {
+              txHash1 = row.orderTxId || row.txHash || row.transactionHash;
+            }
+            if (row.toTokenActualQty) usdtAcquired = parseFloat(row.toTokenActualQty);
+            if (orderStatus1 === 'FINISHED' || orderStatus1 === 'FAILED') break;
+          }
+        } catch (_) {}
+      }
+
+      // If usdtAcquired wasn't returned in query, estimate from sellQty and price (default min 10 USDT)
+      if (!usdtAcquired || usdtAcquired <= 0) {
+        usdtAcquired = 10;
+      }
+
+      // Leg 2: Buy USDT -> toTicker
+      const isOndo2 = BSC_RWA_TOKENS[toTicker]?.type === 1 || Boolean(BSC_RWA_TOKENS[toTicker]?.symbol?.endsWith('on'));
+      const endpoint2 = isOndo2
+        ? '/bapi/defi/v1/public/wallet-direct/web-dex/agent/ondo/place-order'
+        : '/bapi/defi/v1/public/wallet-direct/web-dex/agent/place-order';
+
+      const leg2Payload = {
+        binanceChainId: '56',
+        fromToken: usdtAddress,
+        toToken: targetTokenAddr,
+        amount: String(usdtAcquired),
+        slippage: 'auto',
+        tokenShare: null,
+        multiplier: null,
+        mev: true,
+        gasLevel: 'MEDIUM'
+      };
+
+      let leg2Res = await callBinanceBapi(
+        endpoint2,
+        'POST',
+        leg2Payload,
+        session.agentSessionId,
+        session.clientId
+      );
+
+      if (isOndo2 && (!leg2Res?.data || leg2Res.data.code !== '000000')) {
+        const fallback2 = await callBinanceBapi(
+          '/bapi/defi/v1/public/wallet-direct/web-dex/agent/place-order',
+          'POST',
+          leg2Payload,
+          session.agentSessionId,
+          session.clientId
+        );
+        if (fallback2?.data?.code === '000000') leg2Res = fallback2;
+      }
+
+      const res2 = leg2Res?.data;
+      const orderId2 = res2?.data?.orderId || null;
+      let txHash2 = res2?.data?.txHash || res2?.data?.transactionHash || res2?.data?.orderTxId || null;
+      let orderStatus2 = orderId2 ? 'SUBMITTED' : 'FAILED';
+
+      if (orderId2) {
+        for (let attempt = 0; attempt < 8; attempt++) {
+          try {
+            await new Promise(r => setTimeout(r, 1500));
+            const queryRes2 = await callBinanceBapi(
+              '/bapi/defi/v1/public/wallet-direct/web-dex/agent/batch-query-market-orders',
+              'POST',
+              { orderId: orderId2, binanceChainId: '56', page: 1, pageSize: 1 },
+              session.agentSessionId,
+              session.clientId
+            );
+            const row2 = queryRes2?.data?.data?.rows?.[0];
+            if (row2) {
+              orderStatus2 = row2.status || orderStatus2;
+              if (row2.orderTxId || row2.txHash || row2.transactionHash) {
+                txHash2 = row2.orderTxId || row2.txHash || row2.transactionHash;
+              }
+              if (orderStatus2 === 'FINISHED' || orderStatus2 === 'FAILED') break;
+            }
+          } catch (_) {}
+        }
+      }
+
+      const mainTx = txHash2 || txHash1;
+      const mainStatus = txHash2 ? 'FINISHED' : (orderStatus2 || orderStatus1);
+
+      return {
+        success: true,
+        status: 200,
+        mode: 'STOCK_TO_STOCK_ROTATION',
+        fromTicker,
+        toTicker,
+        soldQty: sellQty,
+        orderId: orderId2 || orderId1,
+        txHash: mainTx,
+        statusDisplay: mainStatus,
+        bscScanUrl: mainTx ? `https://bscscan.com/tx/${mainTx}` : null,
+        allocations: [
+          {
+            ticker: fromTicker,
+            name: BSC_RWA_TOKENS[fromTicker]?.name || fromTicker,
+            success: true,
+            orderId: orderId1,
+            txHash: txHash1,
+            bscScanUrl: txHash1 ? `https://bscscan.com/tx/${txHash1}` : null,
+            status: txHash1 ? 'FINISHED' : orderStatus1
+          },
+          {
+            ticker: toTicker,
+            name: BSC_RWA_TOKENS[toTicker]?.name || toTicker,
+            success: Boolean(orderId2),
+            orderId: orderId2,
+            txHash: txHash2,
+            bscScanUrl: txHash2 ? `https://bscscan.com/tx/${txHash2}` : null,
+            status: txHash2 ? 'FINISHED' : orderStatus2
+          }
+        ],
+        summary: `Rotated ${sellQty} ${fromTicker} → ${toTicker} via BSC DEX (2-hop via USDT).`
+      };
+    } catch (err) {
+      return {
+        success: false,
+        status: 500,
+        code: 'EXECUTION_ERROR',
+        error: `Agentic rotation error: ${err.message}`
+      };
+    }
+  }
+
   // Multi-leg basket allocation flow
   const amount = Number(investmentAmount);
 

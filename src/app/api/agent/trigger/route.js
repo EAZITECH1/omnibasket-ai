@@ -1,5 +1,6 @@
 import { runAgentCycle } from '@/agent/autonomousWorker';
 import { PRESET_BASKETS } from '@/services/tokens';
+import { getBalance } from '@/services/userBawSessionManager';
 
 export async function POST(req) {
   try {
@@ -12,10 +13,31 @@ export async function POST(req) {
     const protocol = host.includes('localhost') ? 'http' : 'https';
     const baseUrl = `${protocol}://${host}`;
 
+    // Read live balances from cookie session or address if available
+    let liveHoldings = body.holdings || null;
+    if (!liveHoldings) {
+      try {
+        const balRes = await getBalance(req);
+        const tokenList = balRes?.data?.balances || balRes?.tokens || [];
+        if (Array.isArray(tokenList) && tokenList.length > 0) {
+          const held = tokenList
+            .filter(t => parseFloat(t.balance || 0) > 0.000001 && t.symbol !== 'USDT')
+            .map(t => ({
+              ticker: t.symbol.replace(/on$/i, ''),
+              valueUsd: parseFloat(t.valueUsd || (parseFloat(t.balance) * (parseFloat(t.price) || 100)))
+            }));
+          if (held.length > 0) {
+            liveHoldings = held;
+          }
+        }
+      } catch (_) {}
+    }
+
     const report = await runAgentCycle({
       basket: selectedBasket,
       depositAmount,
-      baseUrl
+      baseUrl,
+      sampleHoldings: (liveHoldings && liveHoldings.length > 0) ? liveHoldings : undefined
     });
 
     return Response.json({

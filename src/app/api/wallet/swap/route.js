@@ -4,6 +4,7 @@ import { execFile } from 'child_process';
 import util from 'util';
 import { BSC_RWA_TOKENS } from '../../../../services/tokens.js';
 import { ensureBawSession } from '../../../../services/bawSession.js';
+import { executeBasketAutonomous } from '../../../../services/userBawSessionManager.js';
 
 const execFilePromise = util.promisify(execFile);
 const USDT_ADDRESS = BSC_RWA_TOKENS.USDT.contractAddress;
@@ -28,18 +29,58 @@ async function pollOrder(orderId, maxAttempts = 12, intervalMs = 1200) {
 }
 
 export async function POST(req) {
+  const body = await req.json().catch(() => ({}));
+  let { fromTicker, toTicker, fromTokenQty } = body;
+  fromTicker = (fromTicker || '').toUpperCase();
+  toTicker = (toTicker || '').toUpperCase();
+
+  // 1. Try per-user authenticated Binance Agentic session
+  try {
+    const isSell = (fromTicker !== 'USDT' && toTicker === 'USDT');
+    const isRotation = (fromTicker !== 'USDT' && toTicker !== 'USDT');
+    const userPayload = isRotation
+      ? {
+          mode: 'STOCK_TO_STOCK_ROTATION',
+          fromTicker,
+          toTicker,
+          fromQty: fromTokenQty,
+          chainId: 56
+        }
+      : isSell
+        ? {
+            mode: 'REVERSE_EXIT_TO_USDT',
+            fromTicker,
+            toTicker: 'USDT',
+            fromQty: fromTokenQty,
+            investmentAmount: 0,
+            allocations: [{ ticker: 'USDT', fromTicker, amount: fromTokenQty, weight: 100 }],
+            chainId: 56
+          }
+        : {
+            mode: 'BUY_FROM_USDT',
+            fromTicker: 'USDT',
+            toTicker,
+            investmentAmount: parseFloat(fromTokenQty) || 10,
+            allocations: [{ ticker: toTicker, weight: 100 }],
+            chainId: 56
+          };
+
+    const userExec = await executeBasketAutonomous(req, userPayload);
+    if (userExec && userExec.code !== 'WALLET_NOT_CONNECTED' && userExec.code !== 'SESSION_REQUIRED') {
+      return Response.json(userExec, { status: userExec.status || 200 });
+    }
+  } catch (_) {}
+
   const isAgenticEnabled = process.env.ENABLE_AGENTIC_WALLET === 'true';
   if (!isAgenticEnabled) {
     return Response.json({
       success: false,
-      error: 'Shared Agentic Wallet execution is disabled in public mode. Please connect your Binance Web3 Wallet extension to approve and broadcast trades directly.'
+      error: 'Shared Agentic Wallet execution is disabled in public mode. Please connect your Binance Web3 Wallet extension to approve and broadcast trades directly or pair your Binance Agentic Wallet.'
     }, { status: 503 });
   }
 
   try {
     ensureBawSession();
-    const body = await req.json().catch(() => ({}));
-    let { fromTicker, toTicker, fromTokenQty } = body;
 
     // Normalizing tickers
     fromTicker = (fromTicker || '').toUpperCase();
