@@ -460,7 +460,8 @@ export async function checkPairingStatus(req) {
           session.agentSessionId = agentSessionId;
         }
 
-        if (connStatus === 'CONNECTED' || connStatus === 'CONNECTING') {
+        // Only mark appConfirmed when Binance Gateway transitions to CONNECTED (meaning the user actually scanned & approved on mobile)
+        if (connStatus === 'CONNECTED' && session.agentSessionId) {
           session.appConfirmed = true;
           session.status = 'APP_CONFIRMED';
 
@@ -600,7 +601,7 @@ export async function confirmAgentSignin(req, body = {}) {
           session.agentSessionId = agentSessionId;
         }
 
-        if (connStatus === 'CONNECTED' || connStatus === 'CONNECTING') {
+        if (connStatus === 'CONNECTED' && session.agentSessionId) {
           session.appConfirmed = true;
           // Retrieve trusted MPC wallet address on BSC
           const listRes = await callBinanceBapi(
