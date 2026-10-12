@@ -4,7 +4,7 @@ import { BSC_RWA_TOKENS, PRESET_BASKETS } from '../../../services/tokens.js';
 import { getMarketHoursStatus } from '../../../services/marketHours.js';
 import { readBscBalances } from '../../../services/bscBalanceReader.js';
 import { getLivePrices } from '../../../services/livePrices.js';
-import { getSessionIdFromRequest } from '../../../services/userBawSessionManager.js';
+import { getSessionIdFromRequest, executeBasketAutonomous } from '../../../services/userBawSessionManager.js';
 import { loadSession } from '../../../services/bawSessionStore.js';
 
 const execFilePromise = util.promisify(execFile);
@@ -45,17 +45,16 @@ export async function POST(req) {
     let liveWallet = { connected: false, usdtBal: 0, bnbBal: 0, heldStocks: [], tokens: [] };
     let targetAddress = (userAddress && userAddress.startsWith('0x') && userAddress.length === 42) ? userAddress : null;
 
-    if (!targetAddress) {
-      try {
-        const sessionId = getSessionIdFromRequest(req);
-        if (sessionId) {
-          const session = await loadSession(sessionId);
-          if (session?.walletAddress) {
-            targetAddress = session.walletAddress;
-          }
+    let userSession = null;
+    try {
+      const sessionId = getSessionIdFromRequest(req);
+      if (sessionId) {
+        userSession = await loadSession(sessionId);
+        if (!targetAddress && userSession?.walletAddress) {
+          targetAddress = userSession.walletAddress;
         }
-      } catch (_) {}
-    }
+      }
+    } catch (_) {}
 
     if (targetAddress) {
       try {
@@ -376,6 +375,46 @@ export async function POST(req) {
             const tokenLivePrice = livePrices[cleanTicker] || livePrices[targetStock.symbol] || parseFloat(targetStock.priceUsd || targetStock.price) || 150;
             const livePositionValue = (parseFloat(targetStock.balance) * tokenLivePrice).toFixed(2);
             let estimatedUsdt = livePositionValue;
+
+            const shouldAutoExecute = lower.includes('for me') || lower.includes('sell now') || lower.includes('sell it') || lower.includes('execute') || lower.includes('do it');
+            if (shouldAutoExecute && userSession?.agentSessionId) {
+              const execRes = await executeBasketAutonomous(req, {
+                mode: 'REVERSE_EXIT_TO_USDT',
+                fromTicker: cleanTicker,
+                toTicker: 'USDT',
+                fromQty: targetStock.balance,
+                chainId: 56
+              });
+
+              if (execRes?.success) {
+                const finalTxHash = execRes.allocations?.[0]?.txHash || execRes.txHash || null;
+                const orderId = execRes.allocations?.[0]?.orderId || execRes.orderId || null;
+                const txDisplay = finalTxHash
+                  ? `[${finalTxHash.slice(0, 10)}...${finalTxHash.slice(-8)}](https://bscscan.com/tx/${finalTxHash})`
+                  : 'Processing on BSC';
+
+                return Response.json({
+                  type: 'TRADE_PROPOSAL',
+                  reply: `🚀 **Sell Order Executed on BNB Smart Chain!**\n\nI have submitted the sell order for you via your authenticated **Binance Agentic Wallet**:\n\n• **Sold**: \`${parseFloat(targetStock.balance).toFixed(6)}\` **${cleanTicker}** → **USDT**\n• **Status**: \`${finalTxHash ? 'FINISHED' : (execRes.statusDisplay || 'SUBMITTED')}\`\n• **Order ID**: \`${orderId || 'BSC-DEX'}\`\n• **Transaction**: ${txDisplay}\n\nProceeds are routed to your Binance MPC Wallet on BSC #56 under strict 0.5% slippage protection.`,
+                  action: {
+                    type: 'EXECUTE_SWAP',
+                    mode: 'REVERSE_EXIT_TO_USDT',
+                    fromTicker: cleanTicker,
+                    toTicker: 'USDT',
+                    fromQty: targetStock.balance,
+                    estimatedOutput: `${estimatedUsdt} USDT`,
+                    status: finalTxHash ? 'COMPLETED' : 'EXECUTING',
+                    executed: Boolean(finalTxHash),
+                    executing: !finalTxHash,
+                    txHash: finalTxHash,
+                    orderId,
+                    label: `Sold: ${parseFloat(targetStock.balance).toFixed(4)} ${cleanTicker} → USDT`
+                  },
+                  marketStatus,
+                  modelUsed: 'Binance Agentic Wallet MPC ⚡'
+                });
+              }
+            }
 
             return Response.json({
               type: 'TRADE_PROPOSAL',
