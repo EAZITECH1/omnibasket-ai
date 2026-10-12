@@ -1,6 +1,7 @@
 import { createPublicClient, http, parseAbi, formatUnits, formatEther, isAddress } from 'viem';
 import { bsc } from 'viem/chains';
 import { BSC_RWA_TOKENS } from './tokens.js';
+import { getLivePrices, getCachedPrices } from './livePrices.js';
 
 const BSC_RPCS = [
   'https://bsc-dataseed.binance.org/',
@@ -8,17 +9,17 @@ const BSC_RPCS = [
   'https://rpc.ankr.com/bsc'
 ];
 
-const ESTIMATED_PRICES = {
+export const ESTIMATED_PRICES = {
   USDT: 1.0,
   USDY: 1.16,
-  NVDA: 231.20,
-  AAPL: 337.47,
-  MSFT: 536.09,
-  GOOG: 182.40,
-  TSLA: 384.12,
+  NVDA: 229.28,
+  AAPL: 336.64,
+  MSFT: 535.07,
+  GOOG: 347.86,
+  TSLA: 382.70,
   MAG7X: 100.0,
   AI: 100.0,
-  BNB: 600.0
+  BNB: 753.0
 };
 
 const ERC20_ABI = parseAbi([
@@ -94,11 +95,14 @@ export async function readBscBalances(address) {
     );
   }
 
-  // 3. Assemble tokens list
+  // 3. Fetch real-time market prices
+  const livePrices = await getLivePrices().catch(() => ESTIMATED_PRICES);
+
+  // 4. Assemble tokens list
   const tokens = [];
 
   // Add BNB
-  const bnbPrice = ESTIMATED_PRICES.BNB || 600.0;
+  const bnbPrice = livePrices.BNB || ESTIMATED_PRICES.BNB;
   const bnbValue = bnbBalance * bnbPrice;
   tokens.push({
     symbol: 'BNB',
@@ -115,7 +119,7 @@ export async function readBscBalances(address) {
     const rawVal = res && res.status === 'success' ? res.result : 0n;
     const decimals = token.decimals || 18;
     const balanceNum = parseFloat(formatUnits(rawVal, decimals));
-    const priceUsd = ESTIMATED_PRICES[key] || 1.0;
+    const priceUsd = livePrices[key] || ESTIMATED_PRICES[key] || 1.0;
     const valueUsd = balanceNum * priceUsd;
 
     tokens.push({

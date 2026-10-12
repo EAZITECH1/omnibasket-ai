@@ -3,6 +3,7 @@ import util from 'util';
 import { BSC_RWA_TOKENS, PRESET_BASKETS } from '../../../services/tokens.js';
 import { getMarketHoursStatus } from '../../../services/marketHours.js';
 import { readBscBalances } from '../../../services/bscBalanceReader.js';
+import { getLivePrices } from '../../../services/livePrices.js';
 
 const execFilePromise = util.promisify(execFile);
 const USDT_ADDRESS = BSC_RWA_TOKENS.USDT.contractAddress;
@@ -213,16 +214,8 @@ export async function POST(req) {
           // CASE 1: BUY STOCK FROM USDT (e.g. "Rotate all my USDT to NVDA", "Swap USDT to MSFT")
           if (fromTicker === 'USDT' && toTicker && toTicker !== 'USDT') {
             const targetTokenObj = BSC_RWA_TOKENS[toTicker];
-            const REFERENCE_PRICES = {
-              NVDA: 231.20,
-              AAPL: 337.47,
-              MSFT: 536.09,
-              TSLA: 384.12,
-              USDY: 1.16,
-              GOOG: 182.40,
-              MAG7X: 100.00
-            };
-            const targetPrice = REFERENCE_PRICES[toTicker] || targetTokenObj?.mockPrice || 140;
+            const livePrices = await getLivePrices();
+            const targetPrice = livePrices[toTicker] || 140;
 
             if (liveWallet.usdtBal < 4.90) {
               return Response.json({
@@ -639,16 +632,8 @@ Return ONLY valid JSON.`
         const heldStocks = liveWallet.heldStocks || [];
 
         const targetTokenObj = BSC_RWA_TOKENS[ticker];
-        const REFERENCE_PRICES = {
-          NVDA: 231.20,
-          AAPL: 337.47,
-          MSFT: 536.09,
-          TSLA: 384.12,
-          USDY: 1.16,
-          GOOG: 182.40,
-          MAG7X: 100.00
-        };
-        const targetPrice = REFERENCE_PRICES[ticker] || targetTokenObj?.mockPrice || 140;
+        const livePrices = await getLivePrices();
+        const targetPrice = livePrices[ticker] || 140;
 
         // SCENARIO 1: User has >= 4.90 USDT -> Execute Direct Buy from USDT
         if (usdtBal >= 4.90) {

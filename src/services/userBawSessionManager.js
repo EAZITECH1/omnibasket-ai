@@ -8,6 +8,7 @@ import util from 'util';
 import QRCode from 'qrcode';
 import { BSC_RWA_TOKENS } from './tokens.js';
 import { checkTokenBalance } from './bscRouter.js';
+import { readBscBalances } from './bscBalanceReader.js';
 import { 
   saveSession, 
   loadSession, 
@@ -938,14 +939,35 @@ export async function getUserStatus(req) {
 export async function getSettings(req) {
   const sessionId = getSessionIdFromRequest(req);
   const session = sessionId ? await loadSession(sessionId) : null;
-  const quotaLeft = session ? session.quotaLeft : 50000.0;
-  const quotaUsed = session ? session.quotaUsed : 0.0;
+  let dailyLimit = session ? (session.dailyLimit || 50000.0) : 50000.0;
+  let quotaLeft = session ? (session.quotaLeft !== undefined ? session.quotaLeft : dailyLimit) : 50000.0;
+  let quotaUsed = session ? (session.quotaUsed || 0.0) : 0.0;
+
+  if (session?.agentSessionId) {
+    try {
+      const [limitRes, settingsRes] = await Promise.all([
+        callBinanceBapi('/bapi/defi/v1/public/wallet-direct/agent-wallet/trading-limit/query', 'GET', null, session.agentSessionId, session.clientId),
+        callBinanceBapi('/bapi/defi/v1/public/wallet-direct/agent-wallet/settings/query', 'GET', null, session.agentSessionId, session.clientId)
+      ]);
+      if (limitRes?.data?.code === '000000' && limitRes?.data?.data) {
+        quotaUsed = parseFloat(limitRes.data.data.quotaUsed) || 0.0;
+      }
+      if (settingsRes?.data?.code === '000000' && settingsRes?.data?.data) {
+        dailyLimit = parseFloat(settingsRes.data.data.dailyLimit) || dailyLimit;
+      }
+      quotaLeft = Math.max(0, dailyLimit - quotaUsed);
+      session.dailyLimit = dailyLimit;
+      session.quotaUsed = quotaUsed;
+      session.quotaLeft = quotaLeft;
+      await saveSession(sessionId, session);
+    } catch (_) {}
+  }
 
   return {
     success: true,
     status: 200,
     data: {
-      dailyLimit: 50000.0,
+      dailyLimit: Number(dailyLimit.toFixed(2)),
       quotaLeft: Number(quotaLeft.toFixed(2)),
       quotaUsed: Number(quotaUsed.toFixed(2)),
       abnormalTxnHandling: 'AutoReject',
@@ -972,34 +994,22 @@ export async function getBalance(req) {
       data: {
         walletAddress: null,
         chainId: 56,
-        balances: [
-          { symbol: 'USDT', name: 'Tether USD', balance: 0.0, priceUsd: 1.0, valueUsd: 0.0 },
-          { symbol: 'BNB', name: 'BNB Native', balance: 0.0, priceUsd: 580.0, valueUsd: 0.0 }
-        ],
+        balances: [],
         totalValueUsd: 0.0
       }
     };
   }
 
   try {
-    const usdtAddress = BSC_RWA_TOKENS.USDT.contractAddress;
-    const usdtBalanceWei = await checkTokenBalance({
-      tokenAddress: usdtAddress,
-      ownerAddress: session.walletAddress
-    }).catch(() => 0n);
-
-    const usdtFormatted = Number(usdtBalanceWei) / 1e18;
-
+    const liveData = await readBscBalances(session.walletAddress);
     return {
       success: true,
       status: 200,
       data: {
         walletAddress: session.walletAddress,
         chainId: 56,
-        balances: [
-          { symbol: 'USDT', name: 'Tether USD', balance: usdtFormatted, priceUsd: 1.0, valueUsd: usdtFormatted }
-        ],
-        totalValueUsd: usdtFormatted
+        balances: liveData.tokens || [],
+        totalValueUsd: liveData.totalValueUsd || 0.0
       }
     };
   } catch (_) {
@@ -1009,9 +1019,7 @@ export async function getBalance(req) {
       data: {
         walletAddress: session.walletAddress,
         chainId: 56,
-        balances: [
-          { symbol: 'USDT', name: 'Tether USD', balance: 0.0, priceUsd: 1.0, valueUsd: 0.0 }
-        ],
+        balances: [],
         totalValueUsd: 0.0
       }
     };
