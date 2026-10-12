@@ -130,6 +130,40 @@ export function generateEphemeralKeyPair() {
 }
 
 /**
+ * Robustly extract EVM address from various Binance BAPI response shapes
+ */
+export function extractEvmAddressFromBinance(obj) {
+  if (!obj) return null;
+  // 1. Direct subWalletList standard path
+  const subList = obj?.data?.[0]?.subWalletList || obj?.data?.subWalletList || obj?.subWalletList;
+  if (Array.isArray(subList)) {
+    for (const sub of subList) {
+      if (Array.isArray(sub?.addresses)) {
+        const bsc = sub.addresses.find(a => String(a?.binanceChainId || a?.chainId || '') === '56');
+        if (bsc?.address && /^0x[a-fA-F0-9]{40}$/i.test(bsc.address)) return bsc.address;
+        const first = sub.addresses.find(a => a?.address && /^0x[a-fA-F0-9]{40}$/i.test(a.address));
+        if (first?.address) return first.address;
+      }
+    }
+  }
+  // 2. Direct addresses array
+  if (Array.isArray(obj?.addresses)) {
+    const bsc = obj.addresses.find(a => String(a?.binanceChainId || a?.chainId || '') === '56');
+    if (bsc?.address && /^0x[a-fA-F0-9]{40}$/i.test(bsc.address)) return bsc.address;
+    if (obj.addresses[0]?.address && /^0x[a-fA-F0-9]{40}$/i.test(obj.addresses[0].address)) return obj.addresses[0].address;
+  }
+  // 3. Recursive regex search for any valid 0x 40-hex character EVM address
+  try {
+    const jsonStr = JSON.stringify(obj);
+    const matches = jsonStr.match(/0x[a-fA-F0-9]{40}/g);
+    if (matches && matches.length > 0) {
+      return matches[0];
+    }
+  } catch (_) {}
+  return null;
+}
+
+/**
  * Call Binance Gateway BAPI directly with ephemeral client credentials
  */
 async function callBinanceBapi(endpoint, method = 'GET', body = null, agentSessionId = null, clientId = null) {
@@ -487,7 +521,7 @@ export async function checkPairingStatus(req) {
               session.agentSessionId,
               session.clientId
             );
-            const bscAddr = listRes?.data?.data?.[0]?.subWalletList?.[0]?.addresses?.find(a => a.binanceChainId === '56')?.address;
+            const bscAddr = extractEvmAddressFromBinance(listRes?.data);
             if (bscAddr) {
               session.walletAddress = bscAddr;
               session.binanceChainId = '56';
@@ -636,13 +670,53 @@ export async function confirmAgentSignin(req, body = {}) {
             session.agentSessionId,
             session.clientId
           );
-          const bscAddr = listRes?.data?.data?.[0]?.subWalletList?.[0]?.addresses?.find(a => a.binanceChainId === '56')?.address;
+          let bscAddr = extractEvmAddressFromBinance(listRes?.data);
+          if (!bscAddr) {
+            // Fallback: check /login/query
+            const queryRes = await callBinanceBapi(
+              '/bapi/defi/v1/public/wallet-direct/agent-wallet/login/query',
+              'GET',
+              null,
+              session.agentSessionId,
+              session.clientId
+            );
+            bscAddr = extractEvmAddressFromBinance(queryRes?.data);
+          }
           if (bscAddr) {
             session.walletAddress = bscAddr;
             session.binanceChainId = '56';
             isVerifiedByBinance = true;
           }
         }
+      }
+    } catch (_) {}
+  }
+
+  // If already confirmed by listener but wallet address hasn't been fetched yet
+  if (session.appConfirmed && !session.walletAddress && session.agentSessionId) {
+    try {
+      const listRes = await callBinanceBapi(
+        '/bapi/defi/v1/public/wallet-direct/agent-wallet/mpc-wallet/list',
+        'POST',
+        {},
+        session.agentSessionId,
+        session.clientId
+      );
+      let bscAddr = extractEvmAddressFromBinance(listRes?.data);
+      if (!bscAddr) {
+        const queryRes = await callBinanceBapi(
+          '/bapi/defi/v1/public/wallet-direct/agent-wallet/login/query',
+          'GET',
+          null,
+          session.agentSessionId,
+          session.clientId
+        );
+        bscAddr = extractEvmAddressFromBinance(queryRes?.data);
+      }
+      if (bscAddr) {
+        session.walletAddress = bscAddr;
+        session.binanceChainId = '56';
+        isVerifiedByBinance = true;
       }
     } catch (_) {}
   }
