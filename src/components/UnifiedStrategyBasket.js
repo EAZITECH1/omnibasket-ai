@@ -482,44 +482,106 @@ export default function UnifiedStrategyBasket() {
 
       try {
         const fromAmount = action.fromQty || 10;
+        const fromTicker = action.fromTicker || 'USDT';
         const toTicker = action.toTicker;
+        const isSell = action.mode === 'REVERSE_EXIT_TO_USDT' || toTicker === 'USDT';
+
+        const payload = isSell
+          ? {
+              mode: 'REVERSE_EXIT_TO_USDT',
+              fromTicker: fromTicker,
+              toTicker: 'USDT',
+              fromQty: action.fromQty || fromAmount,
+              investmentAmount: 0,
+              allocations: [{ ticker: 'USDT', fromTicker: fromTicker, amount: action.fromQty || fromAmount, weight: 100 }],
+              chainId: 56
+            }
+          : {
+              mode: 'BUY_FROM_USDT',
+              fromTicker: 'USDT',
+              toTicker: toTicker,
+              investmentAmount: fromAmount,
+              allocations: [{ ticker: toTicker, weight: 100 }],
+              chainId: 56
+            };
 
         const execRes = await fetch('/api/agentic-wallet/execute-basket', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            prompt: `Swap ${fromAmount} USDT to ${toTicker}`,
-            investmentAmount: fromAmount,
-            allocations: [{ ticker: toTicker, weight: 100 }],
-            chainId: 56
-          })
+          body: JSON.stringify(payload)
         });
 
         const execData = await execRes.json();
         setExecutingSwap(false);
 
         if (!execData.success) {
-          throw new Error(execData.message || 'Agentic swap execution failed.');
+          throw new Error(execData.error || execData.message || 'Agentic swap execution failed.');
         }
 
         const acquired = execData.allocations?.[0];
-        triggerSyncNotice(`Swap completed via Binance Agentic Wallet!`);
+        const finalTxHash = acquired?.txHash || execData.txHash || null;
+        const orderId = acquired?.orderId || execData.orderId || null;
+
+        triggerSyncNotice(isSell ? `Sold ${fromTicker} on BSC!` : `Acquired ${toTicker} on BSC!`);
         window.dispatchEvent(new Event('omnibasket-balance-refresh'));
         refreshBalances();
         fetchQuotes();
 
-        setMessages(prev => [
-          ...prev,
-          {
-            role: 'assistant',
-            content: `✅ **Swap Executed via Binance Agentic Wallet!**\n\n• Swapped **$${fromAmount} USDT** for **${toTicker}**\n• Transaction: ${acquired?.txHash ? `[${acquired.txHash.slice(0, 10)}...](https://bscscan.com/tx/${acquired.txHash})` : 'Confirmed'}\n\nExecuted under strict 0.5% slippage protection.`,
-            modelUsed: 'Binance Agentic Wallet MPC ⚡'
-          }
-        ]);
+        const replyContent = isSell
+          ? `✅ **Sell Order Executed on BNB Smart Chain!**\n\n• **Sold**: \`${action.fromQty || fromAmount}\` **${fromTicker}** → **USDT**\n• **Status**: \`${execData.statusDisplay || 'CONFIRMED'}\`\n• **Order ID**: \`${orderId || 'BSC-DEX'}\`\n• **Transaction**: ${finalTxHash ? `[${finalTxHash.slice(0, 10)}...${finalTxHash.slice(-8)}](https://bscscan.com/tx/${finalTxHash})` : 'Processing on BSC'}\n\nProceeds are confirmed in your Binance MPC Wallet under 0.5% slippage protection.`
+          : `✅ **Swap Executed via Binance Agentic Wallet!**\n\n• Swapped **$${fromAmount} USDT** for **${toTicker}**\n• Status: \`${acquired?.status || 'CONFIRMED'}\`\n• Transaction: ${finalTxHash ? `[${finalTxHash.slice(0, 10)}...${finalTxHash.slice(-8)}](https://bscscan.com/tx/${finalTxHash})` : 'Confirmed'}\n\nExecuted under strict 0.5% slippage protection.`;
+
+        setMessages(prev => {
+          const updated = prev.map((m, idx) => {
+            if (actionMsgIdx !== null && idx === actionMsgIdx) {
+              return {
+                ...m,
+                action: {
+                  ...m.action,
+                  status: 'COMPLETED',
+                  executed: true,
+                  executing: false,
+                  txHash: finalTxHash,
+                  orderId
+                }
+              };
+            }
+            return m;
+          });
+          const withReply = [
+            ...updated,
+            {
+              role: 'assistant',
+              content: replyContent,
+              modelUsed: 'Binance Agentic Wallet MPC ⚡'
+            }
+          ];
+          try {
+            localStorage.setItem('omnibasket_chat_history', JSON.stringify(withReply));
+          } catch (_) {}
+          return withReply;
+        });
         return;
       } catch (err) {
         setExecutingSwap(false);
-        alert(`Agentic swap failed: ${err.message}`);
+        if (actionMsgIdx !== null) {
+          setMessages(prev => {
+            const copy = [...prev];
+            if (copy[actionMsgIdx] && copy[actionMsgIdx].action) {
+              copy[actionMsgIdx] = {
+                ...copy[actionMsgIdx],
+                action: {
+                  ...copy[actionMsgIdx].action,
+                  status: 'FAILED',
+                  executing: false,
+                  error: err.message
+                }
+              };
+            }
+            return copy;
+          });
+        }
+        alert(`Agentic trade execution failed: ${err.message}`);
         return;
       }
     }

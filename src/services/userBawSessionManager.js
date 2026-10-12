@@ -203,7 +203,7 @@ async function callBinanceBapi(endpoint, method = 'GET', body = null, agentSessi
       path: endpoint,
       method: method,
       headers: headers,
-      timeout: 3000
+      timeout: 8000
     }, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
@@ -1074,6 +1074,150 @@ export async function executeBasketAutonomous(req, body = {}) {
 
   session.lastActive = Date.now();
   const { investmentAmount, allocations, chainId = 56 } = body;
+
+  // App Guardrail 3: Chain ID must be BSC Mainnet 56
+  if (Number(chainId) !== 56) {
+    return {
+      success: false,
+      status: 400,
+      code: 'UNSUPPORTED_CHAIN',
+      error: 'Binance Agentic Wallet execution is strictly pinned to BNB Smart Chain Mainnet (Chain ID 56).'
+    };
+  }
+
+  // Check if this is a direct single SELL / reverse exit order (e.g. NVDA -> USDT)
+  const isDirectSell = body.mode === 'REVERSE_EXIT_TO_USDT' ||
+    (body.fromTicker && body.fromTicker !== 'USDT' && body.toTicker === 'USDT') ||
+    (Array.isArray(allocations) && allocations.length === 1 && allocations[0].ticker === 'USDT' && allocations[0].fromTicker && allocations[0].fromTicker !== 'USDT');
+
+  if (isDirectSell) {
+    const fromTicker = body.fromTicker || (allocations && allocations[0]?.fromTicker) || 'NVDA';
+    const sellQtyRaw = body.fromQty || (allocations && allocations[0]?.amount) || body.investmentAmount;
+    const sellQty = parseFloat(sellQtyRaw);
+
+    if (isNaN(sellQty) || sellQty <= 0) {
+      return {
+        success: false,
+        status: 400,
+        code: 'INVALID_PARAMETERS',
+        error: 'Invalid sell quantity for reverse exit trade.'
+      };
+    }
+
+    const sourceTokenAddr = BSC_RWA_TOKENS[fromTicker]?.contractAddress || body.fromToken;
+    const usdtAddress = BSC_RWA_TOKENS.USDT.contractAddress;
+
+    if (!sourceTokenAddr) {
+      return {
+        success: false,
+        status: 400,
+        code: 'INVALID_PARAMETERS',
+        error: `Unknown contract address for asset ${fromTicker}.`
+      };
+    }
+
+    if (!session.agentSessionId) {
+      return {
+        success: false,
+        status: 503,
+        code: 'AUTONOMOUS_TRADING_UNAVAILABLE',
+        error: 'Binance Agentic session token is not active. Please re-pair your wallet to enable autonomous execution.',
+        walletAddress: session.walletAddress
+      };
+    }
+
+    try {
+      const placeRes = await callBinanceBapi(
+        '/bapi/defi/v1/public/wallet-direct/web-dex/agent/place-order',
+        'POST',
+        {
+          binanceChainId: '56',
+          fromToken: sourceTokenAddr,
+          toToken: usdtAddress,
+          amount: String(sellQty),
+          slippage: '0.5',
+          mev: true,
+          gasLevel: 'MEDIUM'
+        },
+        session.agentSessionId,
+        session.clientId
+      );
+
+      const resData = placeRes?.data;
+      if (resData?.code === '000000' && resData?.data?.orderId) {
+        const orderId = resData.data.orderId;
+        let txHash = resData.data.txHash || resData.data.transactionHash || null;
+        let orderStatus = 'SUBMITTED';
+        let actualReceived = null;
+
+        // Poll for terminal status or txHash from Binance DEX
+        for (let attempt = 0; attempt < 4; attempt++) {
+          try {
+            await new Promise(r => setTimeout(r, 1200));
+            const queryRes = await callBinanceBapi(
+              '/bapi/defi/v1/public/wallet-direct/web-dex/agent/batch-query-market-orders',
+              'POST',
+              {
+                orderId: orderId,
+                binanceChainId: '56',
+                page: 1,
+                pageSize: 1
+              },
+              session.agentSessionId,
+              session.clientId
+            );
+            const row = queryRes?.data?.data?.rows?.[0];
+            if (row) {
+              orderStatus = row.status || orderStatus;
+              if (row.orderTxId) txHash = row.orderTxId;
+              if (row.toTokenActualQty) actualReceived = row.toTokenActualQty;
+              if (orderStatus === 'FINISHED' || orderStatus === 'FAILED') break;
+            }
+          } catch (_) {}
+        }
+
+        return {
+          success: true,
+          status: 200,
+          orderId,
+          txHash,
+          statusDisplay: orderStatus,
+          fromTicker,
+          toTicker: 'USDT',
+          soldQty: sellQty,
+          receivedUsdt: actualReceived,
+          bscScanUrl: txHash ? `https://bscscan.com/tx/${txHash}` : null,
+          allocations: [{
+            ticker: fromTicker,
+            name: BSC_RWA_TOKENS[fromTicker]?.name || fromTicker,
+            success: true,
+            orderId,
+            txHash,
+            bscScanUrl: txHash ? `https://bscscan.com/tx/${txHash}` : null,
+            status: orderStatus
+          }],
+          message: `Successfully submitted sell order for ${sellQty} ${fromTicker} → USDT via Binance Agentic Wallet DEX on BSC.`
+        };
+      } else {
+        const errMsg = resData?.message || resData?.error || 'Binance sell order submission rejected';
+        return {
+          success: false,
+          status: 400,
+          code: 'ORDER_SUBMISSION_REJECTED',
+          error: errMsg
+        };
+      }
+    } catch (err) {
+      return {
+        success: false,
+        status: 500,
+        code: 'EXECUTION_ERROR',
+        error: `Agentic DEX error: ${err.message}`
+      };
+    }
+  }
+
+  // Multi-leg basket allocation flow
   const amount = Number(investmentAmount);
 
   // App Guardrail 1: Quota check
@@ -1098,16 +1242,6 @@ export async function executeBasketAutonomous(req, body = {}) {
     };
   }
 
-  // App Guardrail 3: Chain ID must be BSC Mainnet 56
-  if (Number(chainId) !== 56) {
-    return {
-      success: false,
-      status: 400,
-      code: 'UNSUPPORTED_CHAIN',
-      error: 'Binance Agentic Wallet execution is strictly pinned to BNB Smart Chain Mainnet (Chain ID 56).'
-    };
-  }
-
   // App Guardrail 4: Total weight check
   const totalWeight = allocations.reduce((sum, a) => sum + (Number(a.weight) || 0), 0);
   if (totalWeight > 100.001) {
@@ -1119,7 +1253,6 @@ export async function executeBasketAutonomous(req, body = {}) {
     };
   }
 
-  // If no live Binance agent session token is present on the session:
   if (!session.agentSessionId) {
     return {
       success: false,
@@ -1159,9 +1292,10 @@ export async function executeBasketAutonomous(req, body = {}) {
         name: alloc.name || ticker,
         success: true,
         allocatedUsdt: legUsdt,
-        txHash: '0x' + crypto.randomBytes(32).toString('hex'),
-        orderId: 'HELD_USDT_' + Date.now(),
-        message: 'Held in native USDT base'
+        txHash: null,
+        orderId: 'CASH_RESERVE_' + Date.now(),
+        status: 'RESERVED_USDT',
+        message: 'Held in native USDT base reserve'
       });
       totalSpentUsdt += legUsdt;
       continue;
@@ -1187,7 +1321,34 @@ export async function executeBasketAutonomous(req, body = {}) {
       const resData = placeRes?.data;
       if (resData?.code === '000000' && resData?.data?.orderId) {
         const orderId = resData.data.orderId;
-        const txHash = resData.data.txHash || resData.data.transactionHash || ('0x' + crypto.randomBytes(32).toString('hex'));
+        let txHash = resData.data.txHash || resData.data.transactionHash || null;
+        let orderStatus = 'SUBMITTED';
+
+        // Poll order record to get real txHash
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            await new Promise(r => setTimeout(r, 1200));
+            const queryRes = await callBinanceBapi(
+              '/bapi/defi/v1/public/wallet-direct/web-dex/agent/batch-query-market-orders',
+              'POST',
+              {
+                orderId: orderId,
+                binanceChainId: '56',
+                page: 1,
+                pageSize: 1
+              },
+              session.agentSessionId,
+              session.clientId
+            );
+            const row = queryRes?.data?.data?.rows?.[0];
+            if (row) {
+              orderStatus = row.status || orderStatus;
+              if (row.orderTxId) txHash = row.orderTxId;
+              if (orderStatus === 'FINISHED' || orderStatus === 'FAILED') break;
+            }
+          } catch (_) {}
+        }
+
         results.push({
           ticker,
           name: alloc.name || ticker,
@@ -1195,7 +1356,8 @@ export async function executeBasketAutonomous(req, body = {}) {
           allocatedUsdt: legUsdt,
           orderId,
           txHash,
-          bscScanUrl: `https://bscscan.com/tx/${txHash}`
+          status: orderStatus,
+          bscScanUrl: txHash ? `https://bscscan.com/tx/${txHash}` : null
         });
         totalSpentUsdt += legUsdt;
       } else {
@@ -1233,4 +1395,47 @@ export async function executeBasketAutonomous(req, body = {}) {
     summary: `Executed ${results.filter(r => r.success).length}/${allocations.length} swaps via Binance Agentic Wallet on BSC #56`,
     walletAddress: session.walletAddress
   };
+}
+
+/**
+ * 9. Retrieve Recent Orders for Connected Session
+ */
+export async function getUserRecentOrders(req) {
+  const sessionId = getSessionIdFromRequest(req);
+  if (!sessionId) {
+    return { success: true, orders: [] };
+  }
+  const session = await loadSession(sessionId);
+  if (!session || !session.agentSessionId) {
+    return { success: true, orders: [] };
+  }
+
+  try {
+    const res = await callBinanceBapi(
+      '/bapi/defi/v1/public/wallet-direct/web-dex/agent/batch-query-market-orders',
+      'POST',
+      {
+        binanceChainId: '56',
+        page: 1,
+        pageSize: 20,
+        sort: 'DESC'
+      },
+      session.agentSessionId,
+      session.clientId
+    );
+    const rows = res?.data?.data?.rows || [];
+    const mapped = rows.map(r => ({
+      orderId: r.orderId || r.id,
+      fromTokenName: r.fromTokenName || '',
+      toTokenName: r.toTokenName || '',
+      fromTokenQty: r.fromTokenQty || '',
+      toTokenActualQty: r.toTokenActualQty || '',
+      status: r.status || '',
+      txHash: r.orderTxId || null,
+      bookTime: r.bookTime ? new Date(r.bookTime).toISOString() : null
+    }));
+    return { success: true, orders: mapped };
+  } catch (_) {
+    return { success: true, orders: [] };
+  }
 }

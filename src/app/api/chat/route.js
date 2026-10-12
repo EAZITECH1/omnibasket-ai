@@ -4,6 +4,8 @@ import { BSC_RWA_TOKENS, PRESET_BASKETS } from '../../../services/tokens.js';
 import { getMarketHoursStatus } from '../../../services/marketHours.js';
 import { readBscBalances } from '../../../services/bscBalanceReader.js';
 import { getLivePrices } from '../../../services/livePrices.js';
+import { getSessionIdFromRequest } from '../../../services/userBawSessionManager.js';
+import { loadSession } from '../../../services/bawSessionStore.js';
 
 const execFilePromise = util.promisify(execFile);
 const USDT_ADDRESS = BSC_RWA_TOKENS.USDT.contractAddress;
@@ -41,9 +43,23 @@ export async function POST(req) {
 
     // Read real user wallet state via BSC on-chain reader if connected extension address is provided
     let liveWallet = { connected: false, usdtBal: 0, bnbBal: 0, heldStocks: [], tokens: [] };
-    if (userAddress && userAddress.startsWith('0x') && userAddress.length === 42) {
+    let targetAddress = (userAddress && userAddress.startsWith('0x') && userAddress.length === 42) ? userAddress : null;
+
+    if (!targetAddress) {
       try {
-        const onchain = await readBscBalances(userAddress);
+        const sessionId = getSessionIdFromRequest(req);
+        if (sessionId) {
+          const session = await loadSession(sessionId);
+          if (session?.walletAddress) {
+            targetAddress = session.walletAddress;
+          }
+        }
+      } catch (_) {}
+    }
+
+    if (targetAddress) {
+      try {
+        const onchain = await readBscBalances(targetAddress);
         if (onchain && onchain.success && Array.isArray(onchain.tokens)) {
           const usdtToken = onchain.tokens.find(t => t.symbol === 'USDT');
           const bnbToken = onchain.tokens.find(t => t.symbol === 'BNB');
@@ -52,7 +68,7 @@ export async function POST(req) {
           const heldStocks = onchain.tokens.filter(t => 
             t.symbol !== 'USDT' && t.symbol !== 'BNB' && t.balance > 0.000001
           );
-          liveWallet = { connected: true, usdtBal, bnbBal, heldStocks, tokens: onchain.tokens };
+          liveWallet = { connected: true, address: targetAddress, usdtBal, bnbBal, heldStocks, tokens: onchain.tokens };
         }
       } catch (e) {
         console.warn('On-chain balance query notice in chat:', e.message);
@@ -278,11 +294,14 @@ export async function POST(req) {
             }
 
             const cleanTicker = targetStock.symbol.replace(/on$/i, '');
-            let estimatedUsdt = (parseFloat(targetStock.balance) * (parseFloat(targetStock.price) || 150)).toFixed(2);
+            const livePrices = await getLivePrices();
+            const tokenLivePrice = livePrices[cleanTicker] || livePrices[targetStock.symbol] || parseFloat(targetStock.priceUsd || targetStock.price) || 150;
+            const livePositionValue = (parseFloat(targetStock.balance) * tokenLivePrice).toFixed(2);
+            let estimatedUsdt = livePositionValue;
 
             return Response.json({
               type: 'TRADE_PROPOSAL',
-              reply: `⚡ **Stock Reverse Exit Proposal**:\n\n• **Selling Position**: \`${parseFloat(targetStock.balance).toFixed(6)}\` **${cleanTicker}** (~$${parseFloat(targetStock.value || 0).toFixed(2)} USD)\n• **Destination**: **USDT** on BNB Smart Chain\n• **Estimated Output**: **~${estimatedUsdt} USDT**\n• **Routing**: Direct AMM via PancakeSwap on BSC #56\n\nClick **Confirm & Swap to USDT** below to sign and broadcast with your **connected Binance Web3 Wallet**!`,
+              reply: `⚡ **Stock Reverse Exit Proposal**:\n\n• **Selling Position**: \`${parseFloat(targetStock.balance).toFixed(6)}\` **${cleanTicker}** (~$${livePositionValue} USD)\n• **Destination**: **USDT** on BNB Smart Chain\n• **Estimated Output**: **~${estimatedUsdt} USDT**\n• **Routing**: Direct AMM via PancakeSwap & LiquidMesh on BSC #56\n\nClick **Confirm & Swap to USDT** below to execute via **Binance Agentic Wallet**!`,
               action: {
                 type: 'EXECUTE_SWAP',
                 mode: 'REVERSE_EXIT_TO_USDT',

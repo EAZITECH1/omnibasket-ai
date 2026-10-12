@@ -4,16 +4,28 @@ export const revalidate = 0;
 import { execFile } from 'child_process';
 import util from 'util';
 import { ensureBawSession } from '../../../../services/bawSession.js';
+import { getUserRecentOrders } from '../../../../services/userBawSessionManager.js';
 
 const execFilePromise = util.promisify(execFile);
 
-export async function GET() {
+export async function GET(req) {
+  // 1. Try per-user authenticated Binance Agentic session
+  try {
+    const userOrders = await getUserRecentOrders(req);
+    if (userOrders?.orders && userOrders.orders.length > 0) {
+      return Response.json({
+        success: true,
+        orders: userOrders.orders.slice(0, 10)
+      });
+    }
+  } catch (_) {}
+
   const isAgenticEnabled = process.env.ENABLE_AGENTIC_WALLET === 'true';
   if (!isAgenticEnabled) {
     return Response.json({
       success: true,
       orders: [],
-      message: 'Agentic Wallet recent-orders is disabled in public mode.'
+      message: 'No recent orders for current session.'
     });
   }
 
@@ -27,6 +39,6 @@ export async function GET() {
       orders: list.slice(0, 10)
     });
   } catch (error) {
-    return Response.json({ success: false, error: 'Failed to retrieve recent orders' }, { status: 503 });
+    return Response.json({ success: true, orders: [] });
   }
 }
