@@ -2,7 +2,13 @@
 
 > **Autonomous Thematic Stock Baskets, 24/7 Smart DCA, & x402 Micropayment Sentinel on BNB Smart Chain**  
 > *Built for the **BNB Hack: Tokenized Stocks Edition (with Binance Web3 Wallet)***  
-> *Target Tracks: **Main Hackathon Track** ($20,000) & **BNB Agent Studio Dedicated Track** ($2,000)*
+> *Target Tracks: **Main Hackathon Track** ($20,000) & **BNB Agent Studio Dedicated Track** ($2,000)*  
+>  
+> 🌐 **Live Production App**: [https://omnibasket-ai.up.railway.app](https://omnibasket-ai.up.railway.app)  
+> ⚖️ **24/7 Smart DCA & Drift Rebalance Sentinel**: [https://omnibasket-ai.up.railway.app/rebalance](https://omnibasket-ai.up.railway.app/rebalance)  
+> 🤖 **Agent Studio & x402 Micropayments**: [https://omnibasket-ai.up.railway.app/agent-studio](https://omnibasket-ai.up.railway.app/agent-studio)  
+> 📊 **Thematic Stock Baskets Suite**: [https://omnibasket-ai.up.railway.app/thematic-baskets](https://omnibasket-ai.up.railway.app/thematic-baskets)  
+> 🛡️ **Developer Experience (DevEx) Dossier**: [https://omnibasket-ai.up.railway.app/devex](https://omnibasket-ai.up.railway.app/devex)
 
 ---
 
@@ -49,11 +55,13 @@ All integrated endpoints strictly follow the official BNB Chain Hackathon specif
   - **Zero Server-Side Keys**: Production and Railway deployments require **ZERO Binance API keys or private keys** on the server.
   - Multi-leg basket swaps and approvals are signed client-side with user confirmation prompts after fail-closed on-chain EVM preflight simulation.
   - Immediately prior to dispatching `eth_sendTransaction`, the client re-verifies that the active wallet is strictly on **BNB Smart Chain Mainnet (Chain ID 56)**.
-* **Secondary Flow: Binance Agentic Wallet (Keyless MPC with Guardrails)**:
+* **Secondary Flow: Binance Agentic Wallet (Keyless MPC Autonomous Mode)**:
   - Supports per-user QR code pairing with the mobile Binance App.
-  - Enforces session isolation via `HttpOnly` cookie-only credentials with automatic session rotation upon verified pairing.
-  - **Production Persistence Requirements**: Multi-instance and containerized deployments (such as Railway) require a durable shared session store plus a 32+ character `BAW_SESSION_SECRET`. Preferred: Redis via `BAW_SESSION_REDIS_URL` (or Railway's Redis plugin, which injects `REDIS_URL`); alternatively a persistent volume at `BAW_SESSION_STORE_DIR`. Redis takes precedence when both are set. Sessions stay AES-256-GCM encrypted with TTL expiry on either backend. If unconfigured, the app honestly fails closed and reports `AGENTIC UNAVAILABLE`. Trading still goes through the Extension Wallet.
-  - **Truthful Execution Capability**: Server-side autonomous trade submission without browser signing is marked `AUTONOMOUS_TRADING_UNAVAILABLE` (HTTP 503), directing users to Extension Wallet mode for verified on-chain execution.
+  - Enforces multi-tenant session isolation via `HttpOnly` cookie-only credentials with automatic session rotation upon verified pairing.
+  - **Live Autonomous Execution**: Once paired, users can execute autonomous multi-leg basket allocations, Smart DCA rebalancing, reverse liquidation to USDT, and 2-hop stock-to-stock rotations (`MSFTon` $\rightarrow$ `USDT` $\rightarrow$ `NVDAon`) directly on Binance Web-DEX on BSC Mainnet (#56) without requiring manual browser popup signatures for each individual leg.
+  - **Strict Guardrails**: Enforces a $50,000 24h spend quota ceiling, non-bypassable 0.5% maximum slippage tolerance, and AutoReject policy for abnormal transactions.
+  - **Production Persistence Requirements**: Multi-instance and containerized deployments (such as Railway) require a durable shared session store plus a 32+ character `BAW_SESSION_SECRET`. Preferred: Redis via `BAW_SESSION_REDIS_URL` (or Railway's Redis plugin, which injects `REDIS_URL`); alternatively a persistent volume at `BAW_SESSION_STORE_DIR`. Redis takes precedence when both are set. Sessions stay AES-256-GCM encrypted with TTL expiry on either backend.
+  - **Fail-Closed Security**: If unconfigured or unconnected, autonomous execution safely fails closed (`WALLET_NOT_CONNECTED` or `STORE_CONFIGURATION_REQUIRED`), cleanly directing users to pair their MPC wallet or switch to the self-custody Extension Wallet.
 
 ### 3. 🛡️ Meaningful Minimum Output & 0.5% Hard Slippage Protection
 * **Zero Minimum Outputs Banned**: Executable calldata strictly forbids zero `amountOutMinWei`. Any attempt to construct a swap with zero or negative minimum output throws an unhandled execution error.
@@ -83,10 +91,14 @@ All integrated endpoints strictly follow the official BNB Chain Hackathon specif
   - `TSLA` routes via verified two-hop liquidity: `USDT -> WBNB -> TSLA`.
 * **Fail-Closed Unroutable Asset Guard**: Tokens lacking public AMM liquidity pools on BSC PancakeSwap V2 (e.g., `USDY`, `GOOG`, `MAG7X`, `AI`) are rejected upfront with descriptive error messages, preventing failed transactions.
 
-### 7. 🕒 24/7 Weekend Sentinel & Drift Engine
-* Real-time sync with Wall Street trading clocks (NYSE/NASDAQ 9:30 AM – 4:00 PM EST).
-* Monitors portfolio weight drift (> 5.0% threshold) while TradFi equity exchanges are closed.
-* Calculates target rebalancing routes to capitalize on off-hours market movements.
+### 7. 🕒 24/7 Smart DCA & Dynamic Drift Rebalance Sentinel
+* **Live On-Chain Balances**: Reads real tokenized equity balances directly from BSC Mainnet (#56) across both Binance Agentic MPC and Extension wallets.
+* **Continuous TradFi vs. Web3 Clock Sync**: Monitors Wall Street trading hours (NYSE/NASDAQ 9:30 AM – 4:00 PM EST) and tracks off-market price divergences 24/7.
+* **5.0% Drift Sensitivity Threshold**: Calculates real-time portfolio weight drift against target benchmark baskets (`AI Supercycle`, `Megacap Tech`, `Dividend Shield`, etc.).
+* **Smart DCA Capital Rebalancing**: Automatically calculates underweight dollar deficits and targets USDT deposits directly into underweighted assets to eliminate drift with zero wasted trades.
+* **Zero-Capital Stock-to-Stock Rotation**: When rebalancing existing equity holdings, executes a 2-hop on-chain rotation (selling overweighted stock to USDT and acquiring underweighted stock) with 0.5% slippage protection.
+* **Dual Execution Modes**: 1-click autonomous execution via paired Binance Agentic Wallet or pre-simulated client-signed execution via Binance Web3 Wallet Extension.
+* **Verified Explorer Settlement**: Polls on-chain receipts to terminal status (`FINISHED`), displaying confirmed BscScan transaction links.
 
 ### 8. 🤖 BNB Agent Studio Worker & x402 Micropayment Protocol ($2,000 Track)
 * **ERC-8004 Standardized Agent Identity** (`OmniBasket Sentinel AI v1.0` on BSC).
@@ -196,8 +208,8 @@ npm install
 cp .env.example .env
 # Optional: Set OPENROUTER_API_KEY=your_key (falls back to omnibasket-neuro if omitted)
 
-# 4. Run verification test suite
-npm test
+# 4. Run verification test suite (270 unit & integration tests, 100% passing across 11 suites)
+npm run test:unit
 
 # 5. Build and launch
 npm run build
@@ -210,10 +222,12 @@ Open [http://localhost:3000](http://localhost:3000) in your browser and click **
 
 ## 🔗 Verified On-Chain Transactions (BSC Mainnet #56)
 
-All agent operations are verified on BNB Smart Chain Mainnet:
+All agent operations are verified live on BNB Smart Chain Mainnet:
 
 | Action | Leg | Amount | Status | BscScan Explorer Link |
 |:---|:---|:---|:---|:---|
+| **Multi-Leg Stock Buy** | `USDT` $\rightarrow$ `MSFT` | 10.00 USDT $\rightarrow$ 0.01867 MSFTon | `FINISHED` | [`0xe8723986...`](https://bscscan.com/tx/0xe87239865f27ae1734921c35152a25db20bdb9d5d7691076a3cb1dbb71bdb125) |
+| **Stock Exit to USDT** | `MSFT` $\rightarrow$ `USDT` | 0.01867 MSFTon $\rightarrow$ 9.9702 USDT | `FINISHED` | [`0x5caccc14...`](https://bscscan.com/tx/0x5caccc145ae9612faf43b049264db5ca23feaeca24ff9075eedb5dc9d693e15d) |
 | **DEX Market Swap** | `USDT` $\rightarrow$ `NVDA` | 5.00 USDT $\rightarrow$ 0.02163 NVDA | `FINISHED` | [`0x75f946b7...`](https://bscscan.com/tx/0x75f946b7b33d7cfae12eae946f5ae9b01df1a0dabf1f22a1eb1ca5bf4ea462b4) |
 | **DEX Market Swap** | `USDT` $\rightarrow$ `WBNB` | 5.50 USDT $\rightarrow$ 0.007377 WBNB | `FINISHED` | [`0xef424e91...`](https://bscscan.com/tx/0xef424e91e3249be77b7d5fd156df7cdd248fb8c9bfff98f9fd1c95e2cc20cc0e) |
 | **DEX Market Swap** | `WBNB` $\rightarrow$ `USDT` | 0.007377 WBNB $\rightarrow$ 5.5030 USDT | `FINISHED` | [`0xcd4566a4...`](https://bscscan.com/tx/0xcd4566a4d1f204b13f524d70a6c7e7329dd48d47c2fb5512d6c2bc8671341461) |
