@@ -14,7 +14,8 @@ import {
   loadSession, 
   deleteSession, 
   rotateSession,
-  validateStoreConfig
+  validateStoreConfig,
+  findActiveSessionByWallet
 } from './bawSessionStore.js';
 
 const execFileAsync = util.promisify(execFile);
@@ -1051,17 +1052,15 @@ export async function executeBasketAutonomous(req, body = {}) {
     };
   }
 
+  let session = null;
   const sessionId = getSessionIdFromRequest(req);
-  if (!sessionId) {
-    return {
-      success: false,
-      status: 401,
-      code: 'WALLET_NOT_CONNECTED',
-      error: 'Active session cookie required'
-    };
+  if (sessionId) {
+    session = await loadSession(sessionId);
+  }
+  if (!session && (body.walletAddress || body.targetAddress)) {
+    session = await findActiveSessionByWallet(body.walletAddress || body.targetAddress);
   }
 
-  const session = await loadSession(sessionId);
   if (!session || session.status !== 'CONNECTED' || !session.walletAddress) {
     return {
       success: false,

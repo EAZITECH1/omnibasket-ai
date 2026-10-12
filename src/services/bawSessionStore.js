@@ -510,6 +510,59 @@ export async function rotateSession(oldSessionId, customDir = null, customSecret
 }
 
 /**
+ * Scan sessions and find the active connected session for a wallet address
+ */
+export async function findActiveSessionByWallet(walletAddress, customDir = null, customSecret = null) {
+  if (!walletAddress || typeof walletAddress !== 'string') return null;
+  const target = walletAddress.toLowerCase().trim();
+
+  try {
+    const masterKey = deriveKey(customSecret);
+    const config = validateStoreConfig();
+
+    if (config.backend === 'redis' && !customDir) {
+      await getRedisBackendForUrl(config.redisUrl);
+      if (sharedRedisClient) {
+        let cursor = '0';
+        do {
+          const [next, keys] = await sharedRedisClient.scan(cursor, 'MATCH', `${REDIS_KEY_PREFIX}*`, 'COUNT', 100);
+          cursor = next;
+          for (const key of keys) {
+            try {
+              const enc = await sharedRedisClient.get(key);
+              if (enc) {
+                const dec = decryptSessionData(enc, masterKey);
+                if (dec && dec.walletAddress?.toLowerCase() === target && dec.agentSessionId) {
+                  return dec;
+                }
+              }
+            } catch (_) {}
+          }
+        } while (cursor !== '0');
+      }
+    } else {
+      const storeDir = customDir || config.storeDir || DEFAULT_DEV_STORE_DIR;
+      if (fs.existsSync(storeDir)) {
+        for (const file of fs.readdirSync(storeDir)) {
+          if (file.endsWith('.enc')) {
+            try {
+              const enc = fs.readFileSync(path.join(storeDir, file), 'utf8');
+              const dec = decryptSessionData(enc, masterKey);
+              if (dec && dec.walletAddress?.toLowerCase() === target && dec.agentSessionId) {
+                return dec;
+              }
+            } catch (_) {}
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[bawSessionStore] findActiveSessionByWallet error:', err.message);
+  }
+  return null;
+}
+
+/**
  * Wipe all sessions (Used for test suite teardown)
  */
 export async function clearAllSessions(customDir = null) {
