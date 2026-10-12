@@ -303,7 +303,8 @@ export default function UnifiedStrategyBasket() {
                   return String(o.orderId) === String(m.action.orderId);
                 }
                 // Ticker / timing fallback
-                if (o.status !== 'FINISHED' && o.status !== 'FAILED') return false;
+                const isTerminal = ['FINISHED', 'COMPLETED', 'FAILED', 'EXPIRED', 'CANCELED'].includes(o.status);
+                if (!isTerminal) return false;
                 const orderTime = o.bookTime ? new Date(o.bookTime).getTime() : 0;
                 if (actionTriggerTime > 0 && orderTime < actionTriggerTime - 10000) return false;
 
@@ -313,7 +314,7 @@ export default function UnifiedStrategyBasket() {
               });
 
               if (match) {
-                if (match.status === 'FINISHED' && match.txHash) {
+                if (['FINISHED', 'COMPLETED'].includes(match.status) && match.txHash) {
                   changed = true;
                   return {
                     ...m,
@@ -326,7 +327,7 @@ export default function UnifiedStrategyBasket() {
                       toQty: match.toTokenActualQty || m.action.estimatedOutput
                     }
                   };
-                } else if (match.status === 'FAILED') {
+                } else if (['FAILED', 'EXPIRED', 'CANCELED'].includes(match.status)) {
                   changed = true;
                   return {
                     ...m,
@@ -335,7 +336,7 @@ export default function UnifiedStrategyBasket() {
                       status: 'FAILED',
                       executed: false,
                       executing: false,
-                      error: 'Order failed on Binance DEX'
+                      error: match.error || `Order ${match.status.toLowerCase()} on Binance DEX`
                     }
                   };
                 }
@@ -352,7 +353,7 @@ export default function UnifiedStrategyBasket() {
             }) || (recentOrders.length === 1 && recentOrders[0].txHash ? recentOrders[0] : null);
 
             if (matchedOrder) {
-              if (matchedOrder.status === 'FINISHED' && matchedOrder.txHash) {
+              if (['FINISHED', 'COMPLETED'].includes(matchedOrder.status) && matchedOrder.txHash) {
                 const txLink = `[${matchedOrder.txHash.slice(0, 10)}...${matchedOrder.txHash.slice(-8)}](https://bscscan.com/tx/${matchedOrder.txHash})`;
                 const newContent = m.content
                   .replace('Processing on BSC', txLink)
@@ -364,10 +365,10 @@ export default function UnifiedStrategyBasket() {
                     content: newContent
                   };
                 }
-              } else if (matchedOrder.status === 'FAILED') {
+              } else if (['FAILED', 'EXPIRED', 'CANCELED'].includes(matchedOrder.status)) {
                 const newContent = m.content
-                  .replace('Processing on BSC', 'Failed on-chain')
-                  .replace(/• \*\*Status\*\*: `(SUBMITTED|PENDING|EXECUTING)`/g, '• **Status**: `FAILED`');
+                  .replace('Processing on BSC', `Order ${matchedOrder.status.toLowerCase()}`)
+                  .replace(/• \*\*Status\*\*: `(SUBMITTED|PENDING|EXECUTING)`/g, `• **Status**: \`${matchedOrder.status}\``);
                 if (newContent !== m.content) {
                   changed = true;
                   return {
@@ -1439,18 +1440,31 @@ export default function UnifiedStrategyBasket() {
                                 </span>
                                 <span className="text-[10px] uppercase font-mono tracking-wider">Confirming</span>
                               </div>
-                              <div className="flex justify-between items-center px-1">
+                              <div className="flex justify-between items-center px-1 gap-2 flex-wrap">
                                 {m.action.orderId ? (
                                   <span className="font-mono text-[10px] text-muted-foreground">Order ID: {m.action.orderId.slice(0, 10)}...</span>
                                 ) : <span />}
-                                <button
-                                  type="button"
-                                  onClick={reconcileOrders}
-                                  className="text-[10px] font-mono text-muted-foreground hover:text-bnb-yellow underline flex items-center gap-1 cursor-pointer"
-                                >
-                                  <RefreshCw className="w-3 h-3" />
-                                  Check on-chain receipt now
-                                </button>
+                                <div className="flex items-center gap-3">
+                                  <button
+                                    type="button"
+                                    onClick={reconcileOrders}
+                                    className="text-[10px] font-mono text-muted-foreground hover:text-bnb-yellow underline flex items-center gap-1 cursor-pointer"
+                                  >
+                                    <RefreshCw className="w-3 h-3" />
+                                    Check on-chain receipt now
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setMessages(prev => prev.map((msg, i) => i === idx ? { ...msg, action: { ...msg.action, status: 'FAILED', executing: false, error: 'Dismissed by user' } } : msg));
+                                      setExecutingSwap(false);
+                                      setActiveActionIdx(null);
+                                    }}
+                                    className="text-[10px] font-mono text-muted-foreground hover:text-red-400 underline cursor-pointer"
+                                  >
+                                    Reset card
+                                  </button>
+                                </div>
                               </div>
                             </div>
                           ) : m.action.status === 'FAILED' ? (

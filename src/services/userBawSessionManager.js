@@ -1200,18 +1200,22 @@ export async function executeBasketAutonomous(req, body = {}) {
         for (let attempt = 0; attempt < 8; attempt++) {
           try {
             await new Promise(r => setTimeout(r, 1500));
-            const queryRes = await callBinanceBapi(
+            let queryRes = await callBinanceBapi(
               '/bapi/defi/v1/public/wallet-direct/web-dex/agent/batch-query-market-orders',
               'POST',
-              {
-                orderId: orderId,
-                binanceChainId: '56',
-                page: 1,
-                pageSize: 1
-              },
+              { orderId, page: 1, pageSize: 1 },
               session.agentSessionId,
               session.clientId
             );
+            if (!queryRes?.data?.data?.rows?.[0]) {
+              queryRes = await callBinanceBapi(
+                '/bapi/defi/v1/public/wallet-direct/web-dex/agent/batch-query-market-orders',
+                'POST',
+                { orderId, binanceChainId: '56', page: 1, pageSize: 1 },
+                session.agentSessionId,
+                session.clientId
+              );
+            }
             const row = queryRes?.data?.data?.rows?.[0];
             if (row) {
               orderStatus = row.status || orderStatus;
@@ -1219,7 +1223,7 @@ export async function executeBasketAutonomous(req, body = {}) {
                 txHash = row.orderTxId || row.txHash || row.transactionHash;
               }
               if (row.toTokenActualQty) actualReceived = row.toTokenActualQty;
-              if (orderStatus === 'FINISHED' || orderStatus === 'FAILED') break;
+              if (['FINISHED', 'COMPLETED', 'FAILED', 'EXPIRED', 'CANCELED'].includes(orderStatus)) break;
             }
           } catch (_) {}
         }
@@ -1814,18 +1818,31 @@ export async function getUserRecentOrders(req, targetOrderId = null) {
     // 1. If specific orderId requested, query directly from Binance
     if (orderIdToQuery) {
       try {
-        const specificRes = await callBinanceBapi(
+        let specificRes = await callBinanceBapi(
           '/bapi/defi/v1/public/wallet-direct/web-dex/agent/batch-query-market-orders',
           'POST',
           {
             orderId: orderIdToQuery,
-            binanceChainId: '56',
             page: 1,
             pageSize: 1
           },
           session.agentSessionId,
           session.clientId
         );
+        if (!specificRes?.data?.data?.rows?.[0]) {
+          specificRes = await callBinanceBapi(
+            '/bapi/defi/v1/public/wallet-direct/web-dex/agent/batch-query-market-orders',
+            'POST',
+            {
+              orderId: orderIdToQuery,
+              binanceChainId: '56',
+              page: 1,
+              pageSize: 1
+            },
+            session.agentSessionId,
+            session.clientId
+          );
+        }
         const specificRows = specificRes?.data?.data?.rows || [];
         for (const r of specificRows) {
           const id = r.orderId || r.id;
