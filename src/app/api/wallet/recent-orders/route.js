@@ -12,10 +12,11 @@ export async function GET(req) {
   // 1. Try per-user authenticated Binance Agentic session
   try {
     const userOrders = await getUserRecentOrders(req);
-    if (userOrders?.orders && userOrders.orders.length > 0) {
+    if (userOrders && Array.isArray(userOrders.orders)) {
       return Response.json({
         success: true,
-        orders: userOrders.orders.slice(0, 10)
+        orders: userOrders.orders.slice(0, 10),
+        walletAddress: userOrders.walletAddress || null
       });
     }
   } catch (_) {}

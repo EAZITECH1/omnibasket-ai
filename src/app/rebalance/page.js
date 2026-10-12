@@ -181,7 +181,7 @@ export default function RebalancePage() {
         const data = await res.json();
         const found = data.orders?.find(o => String(o.orderId) === String(orderId));
         if (found) {
-          if (found.status === 'FINISHED' || found.status === 'FAILED') {
+          if (['FINISHED', 'COMPLETED', 'FAILED', 'EXPIRED', 'CANCELED'].includes(found.status)) {
             return found;
           }
         }

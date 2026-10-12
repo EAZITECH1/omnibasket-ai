@@ -314,7 +314,7 @@ export default function UnifiedStrategyBasket() {
               });
 
               if (match) {
-                if (['FINISHED', 'COMPLETED'].includes(match.status) && match.txHash) {
+                if (['FINISHED', 'COMPLETED'].includes(match.status)) {
                   changed = true;
                   return {
                     ...m,
@@ -323,7 +323,7 @@ export default function UnifiedStrategyBasket() {
                       status: 'COMPLETED',
                       executed: true,
                       executing: false,
-                      txHash: match.txHash,
+                      txHash: match.txHash || 'SETTLED_ON_BSC',
                       toQty: match.toTokenActualQty || m.action.estimatedOutput
                     }
                   };
@@ -341,6 +341,19 @@ export default function UnifiedStrategyBasket() {
                   };
                 }
               }
+
+              // If order has been waiting for more than 2 minutes in overnight session, free the executing spinner
+              if (actionTriggerTime > 0 && Date.now() - actionTriggerTime > 120000 && m.action.executing) {
+                changed = true;
+                return {
+                  ...m,
+                  action: {
+                    ...m.action,
+                    executing: false,
+                    isOvernightQueued: true
+                  }
+                };
+              }
             }
           }
 
@@ -353,8 +366,10 @@ export default function UnifiedStrategyBasket() {
             }) || (recentOrders.length === 1 && recentOrders[0].txHash ? recentOrders[0] : null);
 
             if (matchedOrder) {
-              if (['FINISHED', 'COMPLETED'].includes(matchedOrder.status) && matchedOrder.txHash) {
-                const txLink = `[${matchedOrder.txHash.slice(0, 10)}...${matchedOrder.txHash.slice(-8)}](https://bscscan.com/tx/${matchedOrder.txHash})`;
+              if (['FINISHED', 'COMPLETED'].includes(matchedOrder.status)) {
+                const txLink = matchedOrder.txHash
+                  ? `[${matchedOrder.txHash.slice(0, 10)}...${matchedOrder.txHash.slice(-8)}](https://bscscan.com/tx/${matchedOrder.txHash})`
+                  : 'Settled on BSC';
                 const newContent = m.content
                   .replace('Processing on BSC', txLink)
                   .replace(/• \*\*Status\*\*: `(SUBMITTED|PENDING|EXECUTING)`/g, '• **Status**: `FINISHED`');
@@ -1362,6 +1377,55 @@ export default function UnifiedStrategyBasket() {
                       }`}
                     >
                       <FormattedMessageContent content={m.content} isUser={m.role === 'user'} />
+
+                      {/* Interactive Overnight Processing Status Helper */}
+                      {m.role === 'assistant' && m.content && m.content.includes('Processing on BSC') && (
+                        <div className="mt-3 p-3 border border-bnb-yellow/40 bg-bnb-yellow/5 rounded text-[11px] font-mono space-y-2">
+                          <div className="flex items-center justify-between gap-2 text-bnb-yellow font-bold">
+                            <span className="flex items-center gap-1.5">
+                              <RefreshCw className="w-3.5 h-3.5 animate-spin text-bnb-yellow" />
+                              <span>Order Queued in Binance Web-DEX</span>
+                            </span>
+                            <span className="text-[10px] uppercase px-1.5 py-0.5 border border-bnb-yellow/40 bg-bnb-yellow/10">Overnight Session</span>
+                          </div>
+                          <p className="text-[10px] text-muted-foreground leading-normal">
+                            US stock tokens (Ondo RWA) match against overnight RFQ liquidity providers during non-NYSE hours. If liquidity is unfilled, Binance expires the order safely with zero loss of funds.
+                          </p>
+                          <div className="flex items-center justify-between pt-1 border-t border-bnb-yellow/20 text-[10px] flex-wrap gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                reconcileOrders();
+                                fetchLiveBalance();
+                              }}
+                              className="text-bnb-yellow hover:underline cursor-pointer flex items-center gap-1 font-bold"
+                            >
+                              <RefreshCw className="w-3 h-3" />
+                              Refresh Balance & Order Status
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setMessages(prev => {
+                                  const updated = prev.map((msg, i) => i === idx ? {
+                                    ...msg,
+                                    content: msg.content
+                                      .replace('Processing on BSC', 'Queued in Binance DEX (Overnight)')
+                                      .replace(/• \*\*Status\*\*: `(SUBMITTED|PENDING|EXECUTING)`/g, '• **Status**: `QUEUED_OVERNIGHT`')
+                                  } : msg);
+                                  try { localStorage.setItem('omnibasket_chat_history', JSON.stringify(updated)); } catch (_) {}
+                                  return updated;
+                                });
+                                setExecutingSwap(false);
+                                setActiveActionIdx(null);
+                              }}
+                              className="text-muted-foreground hover:text-red-400 underline cursor-pointer"
+                            >
+                              Dismiss "Processing"
+                            </button>
+                          </div>
+                        </div>
+                      )}
 
                       {/* Basket Suggestion Card Inside Chat */}
                       {m.basket && (

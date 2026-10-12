@@ -1863,7 +1863,7 @@ export async function getUserRecentOrders(req, targetOrderId = null) {
     }
 
     // 2. Query latest 20 orders across session
-    const res = await callBinanceBapi(
+    let res = await callBinanceBapi(
       '/bapi/defi/v1/public/wallet-direct/web-dex/agent/batch-query-market-orders',
       'POST',
       {
@@ -1875,6 +1875,19 @@ export async function getUserRecentOrders(req, targetOrderId = null) {
       session.agentSessionId,
       session.clientId
     );
+    if (!res?.data?.data?.rows?.length) {
+      res = await callBinanceBapi(
+        '/bapi/defi/v1/public/wallet-direct/web-dex/agent/batch-query-market-orders',
+        'POST',
+        {
+          page: 1,
+          pageSize: 20,
+          sort: 'DESC'
+        },
+        session.agentSessionId,
+        session.clientId
+      );
+    }
     const rows = res?.data?.data?.rows || [];
     for (const r of rows) {
       const id = r.orderId || r.id;
@@ -1892,8 +1905,12 @@ export async function getUserRecentOrders(req, targetOrderId = null) {
       }
     }
 
-    return { success: true, orders: Array.from(ordersMap.values()) };
+    return {
+      success: true,
+      orders: Array.from(ordersMap.values()),
+      walletAddress: session.walletAddress || null
+    };
   } catch (_) {
-    return { success: true, orders: [] };
+    return { success: true, orders: [], walletAddress: session.walletAddress || null };
   }
 }
