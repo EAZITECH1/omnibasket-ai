@@ -208,7 +208,7 @@ export default function UnifiedStrategyBasket() {
       if (savedMessages) {
         let parsed = JSON.parse(savedMessages);
         if (Array.isArray(parsed) && parsed.length > 0) {
-          // Clean up any false auto-reconciled actions from old orders (e.g. 0x2a4ec7... from earlier session)
+          // Clean up stale orders from earlier sessions
           parsed = parsed.map(m => {
             if (m.action && m.action.type === 'EXECUTE_SWAP') {
               if (m.action.txHash === '0x2a4ec76b62100834df6879af10ab42d88aa7e3fae0e7be29911d9e7964e251f3') {
@@ -223,6 +223,27 @@ export default function UnifiedStrategyBasket() {
                   }
                 };
               }
+              // Reset any stale unconfirmed executing action so user can click Confirm & Swap now
+              if (!m.action.txHash && (m.action.status === 'EXECUTING' || m.action.executing || m.action.orderId)) {
+                return {
+                  ...m,
+                  action: {
+                    ...m.action,
+                    status: 'PROPOSED',
+                    executed: false,
+                    executing: false,
+                    orderId: null
+                  }
+                };
+              }
+            }
+            if (m.role === 'assistant' && m.content && m.content.includes('Processing on BSC')) {
+              return {
+                ...m,
+                content: m.content
+                  .replace('Processing on BSC', 'Order expired on Binance DEX (no funds deducted)')
+                  .replace(/• \*\*Status\*\*: `(SUBMITTED|PENDING|EXECUTING)`/g, '• **Status**: `EXPIRED`')
+              };
             }
             return m;
           });

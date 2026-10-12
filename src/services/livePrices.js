@@ -34,6 +34,7 @@ export async function getLivePrices() {
   try {
     const res = await fetch('https://api.binance.com/api/v3/ticker/price?symbol=BNBUSDT', {
       headers: { 'Accept': 'application/json' },
+      signal: AbortSignal.timeout(2500),
       next: { revalidate: 30 }
     });
     if (res.ok) {
@@ -53,6 +54,7 @@ export async function getLivePrices() {
       try {
         const res = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${ticker}`, {
           headers: { 'User-Agent': 'Mozilla/5.0' },
+          signal: AbortSignal.timeout(2500),
           next: { revalidate: 30 }
         });
         if (res.ok) {

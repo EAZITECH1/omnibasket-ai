@@ -1133,10 +1133,24 @@ export async function executeBasketAutonomous(req, body = {}) {
         ? '/bapi/defi/v1/public/wallet-direct/web-dex/agent/ondo/place-order'
         : '/bapi/defi/v1/public/wallet-direct/web-dex/agent/place-order';
 
+      // Ensure effective sell quantity does not exceed on-chain balance due to rounding
+      let effectiveSellQty = sellQty;
+      if (session.walletAddress && sourceTokenAddr) {
+        try {
+          const balData = await readBscBalances(session.walletAddress);
+          const heldToken = balData?.tokens?.find(t => t.address.toLowerCase() === sourceTokenAddr.toLowerCase());
+          if (heldToken && typeof heldToken.balance === 'number' && heldToken.balance > 0) {
+            if (sellQty >= heldToken.balance * 0.99) {
+              effectiveSellQty = heldToken.balance;
+            }
+          }
+        } catch (_) {}
+      }
+
       const tokenMultiplier = BSC_RWA_TOKENS[fromTicker]?.multiplier || 1.0;
       const tokenAmount = tokenMultiplier !== 1.0
-        ? (sellQty / tokenMultiplier).toFixed(8)
-        : String(sellQty);
+        ? (effectiveSellQty / tokenMultiplier).toFixed(8)
+        : String(effectiveSellQty);
 
       const placePayload = isOndo
         ? {
@@ -1145,14 +1159,14 @@ export async function executeBasketAutonomous(req, body = {}) {
             toToken: usdtAddress,
             amount: tokenAmount,
             slippage: 'auto',
-            tokenShare: String(sellQty),
+            tokenShare: String(effectiveSellQty),
             multiplier: tokenMultiplier
           }
         : {
             binanceChainId: '56',
             fromToken: sourceTokenAddr,
             toToken: usdtAddress,
-            amount: String(sellQty),
+            amount: String(effectiveSellQty),
             slippage: 'auto',
             mev: true,
             gasLevel: 'MEDIUM'
