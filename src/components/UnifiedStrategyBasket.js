@@ -1049,7 +1049,7 @@ export default function UnifiedStrategyBasket() {
         if (!execData.success) {
           setExecutionResult({
             success: false,
-            summary: execData.message || 'Agentic Wallet execution rejected by guardrails.',
+            summary: execData.error || execData.message || 'Agentic Wallet execution rejected by guardrails.',
             results: execData.errors?.map(err => ({ ticker: 'Error', error: err, success: false })) || []
           });
           return;
