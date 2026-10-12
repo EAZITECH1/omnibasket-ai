@@ -31,7 +31,17 @@ export async function GET(req) {
 
   try {
     ensureBawSession();
-    const { stdout } = await execFilePromise('baw', ['market-order', 'list', '--binanceChainId', '56', '--json']);
+    let orderId = null;
+    try {
+      const url = new URL(req.url, 'http://localhost');
+      orderId = url.searchParams.get('orderId');
+    } catch (_) {}
+
+    const args = orderId
+      ? ['market-order', 'list', '--orderId', orderId, '--json']
+      : ['market-order', 'list', '--binanceChainId', '56', '--json'];
+
+    const { stdout } = await execFilePromise('baw', args);
     const parsed = JSON.parse(stdout);
     const list = parsed.data?.list || [];
     return Response.json({

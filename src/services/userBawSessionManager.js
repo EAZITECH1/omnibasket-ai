@@ -1127,33 +1127,57 @@ export async function executeBasketAutonomous(req, body = {}) {
     }
 
     try {
-      const placeRes = await callBinanceBapi(
-        '/bapi/defi/v1/public/wallet-direct/web-dex/agent/place-order',
+      // Determine if token is an Ondo tokenized stock
+      const isOndo = BSC_RWA_TOKENS[fromTicker]?.type === 1 || Boolean(BSC_RWA_TOKENS[fromTicker]?.symbol?.endsWith('on'));
+      const endpoint = isOndo
+        ? '/bapi/defi/v1/public/wallet-direct/web-dex/agent/ondo/place-order'
+        : '/bapi/defi/v1/public/wallet-direct/web-dex/agent/place-order';
+
+      const placePayload = {
+        binanceChainId: '56',
+        fromToken: sourceTokenAddr,
+        toToken: usdtAddress,
+        amount: String(sellQty),
+        slippage: 'auto',
+        tokenShare: String(sellQty),
+        multiplier: 1.0,
+        mev: true,
+        gasLevel: 'MEDIUM'
+      };
+
+      let placeRes = await callBinanceBapi(
+        endpoint,
         'POST',
-        {
-          binanceChainId: '56',
-          fromToken: sourceTokenAddr,
-          toToken: usdtAddress,
-          amount: String(sellQty),
-          slippage: '0.5',
-          mev: true,
-          gasLevel: 'MEDIUM'
-        },
+        placePayload,
         session.agentSessionId,
         session.clientId
       );
 
+      // Graceful fallback: if ondo endpoint rejected with non-zero or not found, try standard place-order
+      if (isOndo && (!placeRes?.data || placeRes.data.code !== '000000')) {
+        const fallbackRes = await callBinanceBapi(
+          '/bapi/defi/v1/public/wallet-direct/web-dex/agent/place-order',
+          'POST',
+          placePayload,
+          session.agentSessionId,
+          session.clientId
+        );
+        if (fallbackRes?.data?.code === '000000') {
+          placeRes = fallbackRes;
+        }
+      }
+
       const resData = placeRes?.data;
       if (resData?.code === '000000' && resData?.data?.orderId) {
         const orderId = resData.data.orderId;
-        let txHash = resData.data.txHash || resData.data.transactionHash || null;
+        let txHash = resData.data.txHash || resData.data.transactionHash || resData.data.orderTxId || null;
         let orderStatus = 'SUBMITTED';
         let actualReceived = null;
 
-        // Poll for terminal status or txHash from Binance DEX
-        for (let attempt = 0; attempt < 4; attempt++) {
+        // Poll for terminal status or txHash from Binance DEX (up to 8 attempts x 1.5s = 12s)
+        for (let attempt = 0; attempt < 8; attempt++) {
           try {
-            await new Promise(r => setTimeout(r, 1200));
+            await new Promise(r => setTimeout(r, 1500));
             const queryRes = await callBinanceBapi(
               '/bapi/defi/v1/public/wallet-direct/web-dex/agent/batch-query-market-orders',
               'POST',
@@ -1169,7 +1193,9 @@ export async function executeBasketAutonomous(req, body = {}) {
             const row = queryRes?.data?.data?.rows?.[0];
             if (row) {
               orderStatus = row.status || orderStatus;
-              if (row.orderTxId) txHash = row.orderTxId;
+              if (row.orderTxId || row.txHash || row.transactionHash) {
+                txHash = row.orderTxId || row.txHash || row.transactionHash;
+              }
               if (row.toTokenActualQty) actualReceived = row.toTokenActualQty;
               if (orderStatus === 'FINISHED' || orderStatus === 'FAILED') break;
             }
@@ -1181,7 +1207,7 @@ export async function executeBasketAutonomous(req, body = {}) {
           status: 200,
           orderId,
           txHash,
-          statusDisplay: orderStatus,
+          statusDisplay: txHash ? 'FINISHED' : orderStatus,
           fromTicker,
           toTicker: 'USDT',
           soldQty: sellQty,
@@ -1194,9 +1220,11 @@ export async function executeBasketAutonomous(req, body = {}) {
             orderId,
             txHash,
             bscScanUrl: txHash ? `https://bscscan.com/tx/${txHash}` : null,
-            status: orderStatus
+            status: txHash ? 'FINISHED' : orderStatus
           }],
-          message: `Successfully submitted sell order for ${sellQty} ${fromTicker} → USDT via Binance Agentic Wallet DEX on BSC.`
+          message: txHash
+            ? `Successfully executed sell order for ${sellQty} ${fromTicker} → USDT on BSC DEX.`
+            : `Sell order submitted for ${sellQty} ${fromTicker} → USDT. Processing on BSC DEX.`
         };
       } else {
         const errMsg = resData?.message || resData?.error || 'Binance sell order submission rejected';
@@ -1302,32 +1330,54 @@ export async function executeBasketAutonomous(req, body = {}) {
     }
 
     try {
-      const placeRes = await callBinanceBapi(
-        '/bapi/defi/v1/public/wallet-direct/web-dex/agent/place-order',
+      const isOndo = BSC_RWA_TOKENS[ticker]?.type === 1 || Boolean(BSC_RWA_TOKENS[ticker]?.symbol?.endsWith('on'));
+      const endpoint = isOndo
+        ? '/bapi/defi/v1/public/wallet-direct/web-dex/agent/ondo/place-order'
+        : '/bapi/defi/v1/public/wallet-direct/web-dex/agent/place-order';
+
+      const placePayload = {
+        binanceChainId: '56',
+        fromToken: BSC_RWA_TOKENS.USDT.contractAddress,
+        toToken: targetToken,
+        amount: String(legUsdt),
+        slippage: 'auto',
+        tokenShare: null,
+        multiplier: null,
+        mev: true,
+        gasLevel: 'MEDIUM'
+      };
+
+      let placeRes = await callBinanceBapi(
+        endpoint,
         'POST',
-        {
-          binanceChainId: '56',
-          fromToken: BSC_RWA_TOKENS.USDT.contractAddress,
-          toToken: targetToken,
-          amount: String(legUsdt),
-          slippage: '0.5',
-          mev: true,
-          gasLevel: 'MEDIUM'
-        },
+        placePayload,
         session.agentSessionId,
         session.clientId
       );
 
+      if (isOndo && (!placeRes?.data || placeRes.data.code !== '000000')) {
+        const fallbackRes = await callBinanceBapi(
+          '/bapi/defi/v1/public/wallet-direct/web-dex/agent/place-order',
+          'POST',
+          placePayload,
+          session.agentSessionId,
+          session.clientId
+        );
+        if (fallbackRes?.data?.code === '000000') {
+          placeRes = fallbackRes;
+        }
+      }
+
       const resData = placeRes?.data;
       if (resData?.code === '000000' && resData?.data?.orderId) {
         const orderId = resData.data.orderId;
-        let txHash = resData.data.txHash || resData.data.transactionHash || null;
+        let txHash = resData.data.txHash || resData.data.transactionHash || resData.data.orderTxId || null;
         let orderStatus = 'SUBMITTED';
 
-        // Poll order record to get real txHash
-        for (let attempt = 0; attempt < 3; attempt++) {
+        // Poll order record to get real txHash (up to 8 attempts x 1.5s = 12s)
+        for (let attempt = 0; attempt < 8; attempt++) {
           try {
-            await new Promise(r => setTimeout(r, 1200));
+            await new Promise(r => setTimeout(r, 1500));
             const queryRes = await callBinanceBapi(
               '/bapi/defi/v1/public/wallet-direct/web-dex/agent/batch-query-market-orders',
               'POST',
@@ -1343,7 +1393,9 @@ export async function executeBasketAutonomous(req, body = {}) {
             const row = queryRes?.data?.data?.rows?.[0];
             if (row) {
               orderStatus = row.status || orderStatus;
-              if (row.orderTxId) txHash = row.orderTxId;
+              if (row.orderTxId || row.txHash || row.transactionHash) {
+                txHash = row.orderTxId || row.txHash || row.transactionHash;
+              }
               if (orderStatus === 'FINISHED' || orderStatus === 'FAILED') break;
             }
           } catch (_) {}
@@ -1356,7 +1408,7 @@ export async function executeBasketAutonomous(req, body = {}) {
           allocatedUsdt: legUsdt,
           orderId,
           txHash,
-          status: orderStatus,
+          status: txHash ? 'FINISHED' : orderStatus,
           bscScanUrl: txHash ? `https://bscscan.com/tx/${txHash}` : null
         });
         totalSpentUsdt += legUsdt;
@@ -1400,7 +1452,7 @@ export async function executeBasketAutonomous(req, body = {}) {
 /**
  * 9. Retrieve Recent Orders for Connected Session
  */
-export async function getUserRecentOrders(req) {
+export async function getUserRecentOrders(req, targetOrderId = null) {
   const sessionId = getSessionIdFromRequest(req);
   if (!sessionId) {
     return { success: true, orders: [] };
@@ -1410,7 +1462,52 @@ export async function getUserRecentOrders(req) {
     return { success: true, orders: [] };
   }
 
+  let orderIdToQuery = targetOrderId;
+  if (!orderIdToQuery && req?.url) {
+    try {
+      const url = new URL(req.url, 'http://localhost');
+      orderIdToQuery = url.searchParams.get('orderId');
+    } catch (_) {}
+  }
+
   try {
+    const ordersMap = new Map();
+
+    // 1. If specific orderId requested, query directly from Binance
+    if (orderIdToQuery) {
+      try {
+        const specificRes = await callBinanceBapi(
+          '/bapi/defi/v1/public/wallet-direct/web-dex/agent/batch-query-market-orders',
+          'POST',
+          {
+            orderId: orderIdToQuery,
+            binanceChainId: '56',
+            page: 1,
+            pageSize: 1
+          },
+          session.agentSessionId,
+          session.clientId
+        );
+        const specificRows = specificRes?.data?.data?.rows || [];
+        for (const r of specificRows) {
+          const id = r.orderId || r.id;
+          if (id) {
+            ordersMap.set(String(id), {
+              orderId: id,
+              fromTokenName: r.fromTokenName || '',
+              toTokenName: r.toTokenName || '',
+              fromTokenQty: r.fromTokenQty || '',
+              toTokenActualQty: r.toTokenActualQty || '',
+              status: r.status || '',
+              txHash: r.orderTxId || r.txHash || r.transactionHash || null,
+              bookTime: r.bookTime ? new Date(r.bookTime).toISOString() : null
+            });
+          }
+        }
+      } catch (_) {}
+    }
+
+    // 2. Query latest 20 orders across session
     const res = await callBinanceBapi(
       '/bapi/defi/v1/public/wallet-direct/web-dex/agent/batch-query-market-orders',
       'POST',
@@ -1424,17 +1521,23 @@ export async function getUserRecentOrders(req) {
       session.clientId
     );
     const rows = res?.data?.data?.rows || [];
-    const mapped = rows.map(r => ({
-      orderId: r.orderId || r.id,
-      fromTokenName: r.fromTokenName || '',
-      toTokenName: r.toTokenName || '',
-      fromTokenQty: r.fromTokenQty || '',
-      toTokenActualQty: r.toTokenActualQty || '',
-      status: r.status || '',
-      txHash: r.orderTxId || null,
-      bookTime: r.bookTime ? new Date(r.bookTime).toISOString() : null
-    }));
-    return { success: true, orders: mapped };
+    for (const r of rows) {
+      const id = r.orderId || r.id;
+      if (id && !ordersMap.has(String(id))) {
+        ordersMap.set(String(id), {
+          orderId: id,
+          fromTokenName: r.fromTokenName || '',
+          toTokenName: r.toTokenName || '',
+          fromTokenQty: r.fromTokenQty || '',
+          toTokenActualQty: r.toTokenActualQty || '',
+          status: r.status || '',
+          txHash: r.orderTxId || r.txHash || r.transactionHash || null,
+          bookTime: r.bookTime ? new Date(r.bookTime).toISOString() : null
+        });
+      }
+    }
+
+    return { success: true, orders: Array.from(ordersMap.values()) };
   } catch (_) {
     return { success: true, orders: [] };
   }

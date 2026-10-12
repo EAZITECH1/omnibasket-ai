@@ -265,7 +265,24 @@ export default function UnifiedStrategyBasket() {
   // Reconcile recent on-chain executions across all recent BSC orders
   const reconcileOrders = async () => {
     try {
-      const res = await fetch('/api/wallet/recent-orders?t=' + Date.now(), { cache: 'no-store' });
+      // Find any active orderId that needs reconciliation
+      let activeOrderId = null;
+      for (const m of messages) {
+        if (m.action && m.action.type === 'EXECUTE_SWAP' && !m.action.txHash && m.action.orderId) {
+          activeOrderId = m.action.orderId;
+          break;
+        }
+        if (m.orderId && m.content && m.content.includes('Processing on BSC')) {
+          activeOrderId = m.orderId;
+          break;
+        }
+      }
+
+      const queryUrl = activeOrderId
+        ? `/api/wallet/recent-orders?orderId=${encodeURIComponent(activeOrderId)}&t=${Date.now()}`
+        : `/api/wallet/recent-orders?t=${Date.now()}`;
+
+      const res = await fetch(queryUrl, { cache: 'no-store' });
       const data = await res.json();
       if (!data.success || !Array.isArray(data.orders) || data.orders.length === 0) return;
 
@@ -273,46 +290,95 @@ export default function UnifiedStrategyBasket() {
 
       setMessages(prev => {
         let changed = false;
-        const updated = prev.map(m => {
-          // STRICT RULE: ONLY reconcile proposals that the user ACTUALLY executed (status === 'EXECUTING')
-          if (m.action && m.action.type === 'EXECUTE_SWAP' && m.action.status === 'EXECUTING') {
-            const actionTriggerTime = m.action.executedAt || 0;
+        const updated = prev.map((m, mIdx) => {
+          // 1. Reconcile EXECUTE_SWAP action cards
+          if (m.action && m.action.type === 'EXECUTE_SWAP') {
+            const needsReconciliation = m.action.status === 'EXECUTING' || (!m.action.txHash && m.action.orderId);
+            if (needsReconciliation) {
+              const actionTriggerTime = m.action.executedAt || 0;
 
-            // Find matching finished order in recent orders
-            const match = recentOrders.find(o => {
-              if (o.status !== 'FINISHED' || !o.txHash) return false;
-
-              // 1. If we have exact orderId from swap submission, match strictly on orderId!
-              if (m.action.orderId) {
-                return o.orderId === m.action.orderId;
-              }
-
-              // 2. If matching by ticker, order MUST have been created AFTER execution was triggered
-              const orderTime = o.bookTime ? new Date(o.bookTime).getTime() : 0;
-              if (actionTriggerTime > 0 && orderTime < actionTriggerTime - 10000) {
-                return false; // Reject orders from earlier transactions!
-              }
-
-              const matchesTo = m.action.toTicker && (o.toTokenName?.toUpperCase().includes(m.action.toTicker.toUpperCase()) || o.toTokenName?.toUpperCase() === m.action.toTicker.toUpperCase());
-              const matchesFrom = m.action.fromTicker && (o.fromTokenName?.toUpperCase().includes(m.action.fromTicker.toUpperCase()) || o.fromTokenName?.toUpperCase() === m.action.fromTicker.toUpperCase());
-              return matchesTo || matchesFrom;
-            });
-
-            if (match) {
-              changed = true;
-              return {
-                ...m,
-                action: {
-                  ...m.action,
-                  status: 'COMPLETED',
-                  executed: true,
-                  executing: false,
-                  txHash: match.txHash,
-                  toQty: match.toTokenActualQty || m.action.estimatedOutput
+              const match = recentOrders.find(o => {
+                // Match strictly on orderId if available
+                if (m.action.orderId && o.orderId) {
+                  return String(o.orderId) === String(m.action.orderId);
                 }
-              };
+                // Ticker / timing fallback
+                if (o.status !== 'FINISHED' && o.status !== 'FAILED') return false;
+                const orderTime = o.bookTime ? new Date(o.bookTime).getTime() : 0;
+                if (actionTriggerTime > 0 && orderTime < actionTriggerTime - 10000) return false;
+
+                const matchesTo = m.action.toTicker && (o.toTokenName?.toUpperCase().includes(m.action.toTicker.toUpperCase()) || o.toTokenName?.toUpperCase() === m.action.toTicker.toUpperCase());
+                const matchesFrom = m.action.fromTicker && (o.fromTokenName?.toUpperCase().includes(m.action.fromTicker.toUpperCase()) || o.fromTokenName?.toUpperCase() === m.action.fromTicker.toUpperCase());
+                return matchesTo || matchesFrom;
+              });
+
+              if (match) {
+                if (match.status === 'FINISHED' && match.txHash) {
+                  changed = true;
+                  return {
+                    ...m,
+                    action: {
+                      ...m.action,
+                      status: 'COMPLETED',
+                      executed: true,
+                      executing: false,
+                      txHash: match.txHash,
+                      toQty: match.toTokenActualQty || m.action.estimatedOutput
+                    }
+                  };
+                } else if (match.status === 'FAILED') {
+                  changed = true;
+                  return {
+                    ...m,
+                    action: {
+                      ...m.action,
+                      status: 'FAILED',
+                      executed: false,
+                      executing: false,
+                      error: 'Order failed on Binance DEX'
+                    }
+                  };
+                }
+              }
             }
           }
+
+          // 2. Reconcile Assistant Chat Messages displaying "Processing on BSC"
+          if (m.role === 'assistant' && m.content && m.content.includes('Processing on BSC')) {
+            const matchedOrder = recentOrders.find(o => {
+              if (m.orderId && o.orderId && String(m.orderId) === String(o.orderId)) return true;
+              if (o.orderId && m.content.includes(String(o.orderId))) return true;
+              return false;
+            }) || (recentOrders.length === 1 && recentOrders[0].txHash ? recentOrders[0] : null);
+
+            if (matchedOrder) {
+              if (matchedOrder.status === 'FINISHED' && matchedOrder.txHash) {
+                const txLink = `[${matchedOrder.txHash.slice(0, 10)}...${matchedOrder.txHash.slice(-8)}](https://bscscan.com/tx/${matchedOrder.txHash})`;
+                const newContent = m.content
+                  .replace('Processing on BSC', txLink)
+                  .replace(/• \*\*Status\*\*: `(SUBMITTED|PENDING|EXECUTING)`/g, '• **Status**: `FINISHED`');
+                if (newContent !== m.content) {
+                  changed = true;
+                  return {
+                    ...m,
+                    content: newContent
+                  };
+                }
+              } else if (matchedOrder.status === 'FAILED') {
+                const newContent = m.content
+                  .replace('Processing on BSC', 'Failed on-chain')
+                  .replace(/• \*\*Status\*\*: `(SUBMITTED|PENDING|EXECUTING)`/g, '• **Status**: `FAILED`');
+                if (newContent !== m.content) {
+                  changed = true;
+                  return {
+                    ...m,
+                    content: newContent
+                  };
+                }
+              }
+            }
+          }
+
           return m;
         });
 
@@ -320,9 +386,13 @@ export default function UnifiedStrategyBasket() {
           try {
             localStorage.setItem('omnibasket_chat_history', JSON.stringify(updated));
           } catch (_) {}
-          setExecutingSwap(false);
-          setActiveActionIdx(null);
+          const stillExecuting = updated.some(m => m.action && m.action.status === 'EXECUTING');
+          if (!stillExecuting) {
+            setExecutingSwap(false);
+            setActiveActionIdx(null);
+          }
           fetchLiveBalance();
+          window.dispatchEvent(new Event('omnibasket-balance-refresh'));
           return updated;
         }
         return prev;
@@ -330,12 +400,15 @@ export default function UnifiedStrategyBasket() {
     } catch (_) {}
   };
 
-  // Continuously reconcile orders whenever any action is actively EXECUTING
+  // Continuously reconcile orders whenever any action is actively EXECUTING or awaiting txHash
   useEffect(() => {
     reconcileOrders();
 
     const interval = setInterval(() => {
-      const hasExecuting = messages.some(m => m.action && m.action.type === 'EXECUTE_SWAP' && m.action.status === 'EXECUTING');
+      const hasExecuting = messages.some(m =>
+        (m.action && m.action.type === 'EXECUTE_SWAP' && (m.action.status === 'EXECUTING' || (!m.action.txHash && m.action.orderId))) ||
+        (m.role === 'assistant' && m.content && m.content.includes('Processing on BSC'))
+      );
       if (hasExecuting || executingSwap) {
         reconcileOrders();
       }
@@ -512,9 +585,10 @@ export default function UnifiedStrategyBasket() {
         });
 
         const execData = await execRes.json();
-        setExecutingSwap(false);
 
         if (!execData.success) {
+          setExecutingSwap(false);
+          setActiveActionIdx(null);
           throw new Error(execData.error || execData.message || 'Agentic swap execution failed.');
         }
 
@@ -522,14 +596,24 @@ export default function UnifiedStrategyBasket() {
         const finalTxHash = acquired?.txHash || execData.txHash || null;
         const orderId = acquired?.orderId || execData.orderId || null;
 
-        triggerSyncNotice(isSell ? `Sold ${fromTicker} on BSC!` : `Acquired ${toTicker} on BSC!`);
+        if (finalTxHash) {
+          setExecutingSwap(false);
+          setActiveActionIdx(null);
+          triggerSyncNotice(isSell ? `Sold ${fromTicker} on BSC!` : `Acquired ${toTicker} on BSC!`);
+        } else {
+          // Keep active execution indicators alive so reconcileOrders background poller continues
+          setExecutingSwap(true);
+          setActiveActionIdx(actionMsgIdx);
+          triggerSyncNotice(isSell ? `Sell order broadcasted on BSC...` : `Swap order broadcasted on BSC...`);
+        }
+
         window.dispatchEvent(new Event('omnibasket-balance-refresh'));
         refreshBalances();
         fetchQuotes();
 
         const replyContent = isSell
-          ? `✅ **Sell Order Executed on BNB Smart Chain!**\n\n• **Sold**: \`${action.fromQty || fromAmount}\` **${fromTicker}** → **USDT**\n• **Status**: \`${execData.statusDisplay || 'CONFIRMED'}\`\n• **Order ID**: \`${orderId || 'BSC-DEX'}\`\n• **Transaction**: ${finalTxHash ? `[${finalTxHash.slice(0, 10)}...${finalTxHash.slice(-8)}](https://bscscan.com/tx/${finalTxHash})` : 'Processing on BSC'}\n\nProceeds are confirmed in your Binance MPC Wallet under 0.5% slippage protection.`
-          : `✅ **Swap Executed via Binance Agentic Wallet!**\n\n• Swapped **$${fromAmount} USDT** for **${toTicker}**\n• Status: \`${acquired?.status || 'CONFIRMED'}\`\n• Transaction: ${finalTxHash ? `[${finalTxHash.slice(0, 10)}...${finalTxHash.slice(-8)}](https://bscscan.com/tx/${finalTxHash})` : 'Confirmed'}\n\nExecuted under strict 0.5% slippage protection.`;
+          ? `✅ **Sell Order ${finalTxHash ? 'Executed' : 'Submitted'} on BNB Smart Chain!**\n\n• **Sold**: \`${action.fromQty || fromAmount}\` **${fromTicker}** → **USDT**\n• **Status**: \`${finalTxHash ? 'FINISHED' : (execData.statusDisplay || 'SUBMITTED')}\`\n• **Order ID**: \`${orderId || 'BSC-DEX'}\`\n• **Transaction**: ${finalTxHash ? `[${finalTxHash.slice(0, 10)}...${finalTxHash.slice(-8)}](https://bscscan.com/tx/${finalTxHash})` : 'Processing on BSC'}\n\nProceeds are confirmed in your Binance MPC Wallet under 0.5% slippage protection.`
+          : `✅ **Swap ${finalTxHash ? 'Executed' : 'Submitted'} via Binance Agentic Wallet!**\n\n• Swapped **$${fromAmount} USDT** for **${toTicker}**\n• Status: \`${finalTxHash ? 'FINISHED' : (acquired?.status || 'SUBMITTED')}\`\n• Order ID: \`${orderId || 'BSC-DEX'}\`\n• Transaction: ${finalTxHash ? `[${finalTxHash.slice(0, 10)}...${finalTxHash.slice(-8)}](https://bscscan.com/tx/${finalTxHash})` : 'Processing on BSC'}\n\nExecuted under strict 0.5% slippage protection.`;
 
         setMessages(prev => {
           const updated = prev.map((m, idx) => {
@@ -538,9 +622,9 @@ export default function UnifiedStrategyBasket() {
                 ...m,
                 action: {
                   ...m.action,
-                  status: 'COMPLETED',
-                  executed: true,
-                  executing: false,
+                  status: finalTxHash ? 'COMPLETED' : 'EXECUTING',
+                  executed: Boolean(finalTxHash),
+                  executing: !finalTxHash,
                   txHash: finalTxHash,
                   orderId
                 }
@@ -553,6 +637,8 @@ export default function UnifiedStrategyBasket() {
             {
               role: 'assistant',
               content: replyContent,
+              orderId,
+              actionMsgIdx,
               modelUsed: 'Binance Agentic Wallet MPC ⚡'
             }
           ];
@@ -561,9 +647,15 @@ export default function UnifiedStrategyBasket() {
           } catch (_) {}
           return withReply;
         });
+
+        // If order still processing without hash, immediately trigger an initial reconciliation attempt
+        if (!finalTxHash) {
+          setTimeout(reconcileOrders, 2000);
+        }
         return;
       } catch (err) {
         setExecutingSwap(false);
+        setActiveActionIdx(null);
         if (actionMsgIdx !== null) {
           setMessages(prev => {
             const copy = [...prev];
@@ -1306,7 +1398,7 @@ export default function UnifiedStrategyBasket() {
                           </div>
 
                           {/* Order Status Display */}
-                          {(m.action.executed || m.action.status === 'COMPLETED') ? (
+                          {(m.action.executed || m.action.status === 'COMPLETED') && m.action.txHash ? (
                             <div className="border border-emerald-400 bg-emerald-950/20 p-2.5 text-xs text-emerald-400 font-bold flex items-center justify-between">
                               <span className="flex items-center gap-1.5">
                                 <CheckCircle2 className="w-4 h-4" />
@@ -1324,7 +1416,7 @@ export default function UnifiedStrategyBasket() {
                                 </a>
                               )}
                             </div>
-                          ) : (m.action.status === 'EXECUTING' || (executingSwap && activeActionIdx === idx)) ? (
+                          ) : (m.action.status === 'EXECUTING' || (m.action.orderId && !m.action.txHash && m.action.status !== 'FAILED') || (executingSwap && activeActionIdx === idx)) ? (
                             <div className="space-y-1.5">
                               <div className="border border-bnb-yellow bg-bnb-yellow/10 p-2.5 text-xs text-bnb-yellow font-bold flex items-center justify-between animate-pulse">
                                 <span className="flex items-center gap-2">
@@ -1333,7 +1425,10 @@ export default function UnifiedStrategyBasket() {
                                 </span>
                                 <span className="text-[10px] uppercase font-mono tracking-wider">Confirming</span>
                               </div>
-                              <div className="flex justify-end">
+                              <div className="flex justify-between items-center px-1">
+                                {m.action.orderId ? (
+                                  <span className="font-mono text-[10px] text-muted-foreground">Order ID: {m.action.orderId.slice(0, 10)}...</span>
+                                ) : <span />}
                                 <button
                                   type="button"
                                   onClick={reconcileOrders}
