@@ -175,9 +175,9 @@ async function callBinanceBapi(endpoint, method = 'GET', body = null, agentSessi
       res.on('end', () => {
         try {
           const json = JSON.parse(data);
-          resolve({ status: res.statusCode, data: json });
+          resolve({ status: res.statusCode, headers: res.headers, data: json });
         } catch (_) {
-          resolve({ status: res.statusCode, raw: data });
+          resolve({ status: res.statusCode, headers: res.headers, raw: data });
         }
       });
     });
@@ -454,14 +454,27 @@ export async function checkPairingStatus(req) {
 
       if (confirmRes?.data?.code === '000000') {
         const connStatus = confirmRes.data.data?.connectionStatus;
-        const agentSessionId = confirmRes.data.data?.agentSessionId;
+        let agentSessionId = confirmRes.data.data?.agentSessionId;
+
+        // Binance sets agentSessionId in Set-Cookie header
+        if (!agentSessionId && confirmRes.headers?.['set-cookie']) {
+          const sc = confirmRes.headers['set-cookie'];
+          const cookies = Array.isArray(sc) ? sc : [sc];
+          for (const c of cookies) {
+            const m = c.match(/agentSessionId=([^;]+)/);
+            if (m) {
+              agentSessionId = m[1];
+              break;
+            }
+          }
+        }
 
         if (agentSessionId) {
           session.agentSessionId = agentSessionId;
         }
 
         // Only mark appConfirmed when Binance Gateway transitions to CONNECTED (meaning the user actually scanned & approved on mobile)
-        if (connStatus === 'CONNECTED' && session.agentSessionId) {
+        if (connStatus === 'CONNECTED' && (session.agentSessionId || agentSessionId)) {
           session.appConfirmed = true;
           session.status = 'APP_CONFIRMED';
 
@@ -595,13 +608,25 @@ export async function confirmAgentSignin(req, body = {}) {
 
       if (confirmRes?.data?.code === '000000') {
         const connStatus = confirmRes.data.data?.connectionStatus;
-        const agentSessionId = confirmRes.data.data?.agentSessionId;
+        let agentSessionId = confirmRes.data.data?.agentSessionId;
+
+        if (!agentSessionId && confirmRes.headers?.['set-cookie']) {
+          const sc = confirmRes.headers['set-cookie'];
+          const cookies = Array.isArray(sc) ? sc : [sc];
+          for (const c of cookies) {
+            const m = c.match(/agentSessionId=([^;]+)/);
+            if (m) {
+              agentSessionId = m[1];
+              break;
+            }
+          }
+        }
 
         if (agentSessionId) {
           session.agentSessionId = agentSessionId;
         }
 
-        if (connStatus === 'CONNECTED' && session.agentSessionId) {
+        if (connStatus === 'CONNECTED' && (session.agentSessionId || agentSessionId)) {
           session.appConfirmed = true;
           // Retrieve trusted MPC wallet address on BSC
           const listRes = await callBinanceBapi(
