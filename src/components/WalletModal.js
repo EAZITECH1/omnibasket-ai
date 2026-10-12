@@ -375,13 +375,23 @@ export default function WalletModal() {
                 </div>
 
                 {/* Execution Capability & Guardrails Notices */}
-                <div className="border border-amber-500/40 bg-amber-950/20 p-2.5 text-[11px] text-amber-300 flex items-start gap-2">
-                  <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                  <div>
-                    <strong className="block font-bold">Autonomous Trade Execution Unavailable</strong>
-                    <span>Server-side autonomous swap execution is unavailable in this deployment. Your Binance MPC address and balances are paired and tracked, but multi-leg basket trade execution requires browser signing via <strong>Extension Wallet</strong> mode.</span>
+                {agenticSession?.tradingAvailable ? (
+                  <div className="border border-emerald-500/40 bg-emerald-950/20 p-2.5 text-[11px] text-emerald-300 flex items-start gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                    <div>
+                      <strong className="block font-bold">Autonomous Trade Execution Active</strong>
+                      <span>Keyless MPC swaps are enabled directly through the Binance Agentic Gateway on BNB Smart Chain under strict 0.5% slippage protection.</span>
+                    </div>
                   </div>
-                </div>
+                ) : (
+                  <div className="border border-amber-500/40 bg-amber-950/20 p-2.5 text-[11px] text-amber-300 flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                    <div>
+                      <strong className="block font-bold">Autonomous Trade Execution Inactive</strong>
+                      <span>Please pair your Binance App via the QR code above to enable autonomous trade execution.</span>
+                    </div>
+                  </div>
+                )}
 
                 <div className="border border-foreground/20 bg-background p-2.5 text-[11px] text-muted-foreground flex items-center gap-2">
                   <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />

@@ -131,8 +131,12 @@ export default function Navbar() {
               <span className="inline-block h-2 w-2 rounded-full bg-emerald-400"></span>
               <span>{formatAddress(address)}</span>
               {walletMode === 'agentic' && (
-                <span className="text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/40 px-1.5 py-0.5 font-mono font-bold">
-                  PAIRED (NO TRADING)
+                <span className={`text-[10px] px-1.5 py-0.5 font-mono font-bold border ${
+                  agenticSession?.tradingAvailable
+                    ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                    : 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                }`}>
+                  {agenticSession?.tradingAvailable ? 'AGENTIC MPC' : 'PAIRED (NO TRADING)'}
                 </span>
               )}
               <span className="hidden sm:inline text-bnb-yellow font-black">
