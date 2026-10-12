@@ -68,7 +68,7 @@ export async function GET(req) {
     let queryRes = await callBinanceBapi(
       '/bapi/defi/v1/public/wallet-direct/web-dex/agent/batch-query-market-orders',
       'POST',
-      { orderId, binanceChainId: '56', page: 1, pageSize: 10 },
+      { binanceChainId: '56', page: 1, pageSize: 50, orderIds: [orderId], orderIdList: [orderId], orderId },
       session.agentSessionId,
       session.clientId
     );
@@ -77,7 +77,7 @@ export async function GET(req) {
       queryRes = await callBinanceBapi(
         '/bapi/defi/v1/public/wallet-direct/web-dex/agent/batch-query-market-orders',
         'POST',
-        { page: 1, pageSize: 10 },
+        { page: 1, pageSize: 50 },
         session.agentSessionId,
         session.clientId
       );
