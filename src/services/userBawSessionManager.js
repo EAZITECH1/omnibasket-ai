@@ -1133,17 +1133,30 @@ export async function executeBasketAutonomous(req, body = {}) {
         ? '/bapi/defi/v1/public/wallet-direct/web-dex/agent/ondo/place-order'
         : '/bapi/defi/v1/public/wallet-direct/web-dex/agent/place-order';
 
-      const placePayload = {
-        binanceChainId: '56',
-        fromToken: sourceTokenAddr,
-        toToken: usdtAddress,
-        amount: String(sellQty),
-        slippage: 'auto',
-        tokenShare: String(sellQty),
-        multiplier: 1.0,
-        mev: true,
-        gasLevel: 'MEDIUM'
-      };
+      const tokenMultiplier = BSC_RWA_TOKENS[fromTicker]?.multiplier || 1.0;
+      const tokenAmount = tokenMultiplier !== 1.0
+        ? (sellQty / tokenMultiplier).toFixed(8)
+        : String(sellQty);
+
+      const placePayload = isOndo
+        ? {
+            binanceChainId: '56',
+            fromToken: sourceTokenAddr,
+            toToken: usdtAddress,
+            amount: tokenAmount,
+            slippage: 'auto',
+            tokenShare: String(sellQty),
+            multiplier: tokenMultiplier
+          }
+        : {
+            binanceChainId: '56',
+            fromToken: sourceTokenAddr,
+            toToken: usdtAddress,
+            amount: String(sellQty),
+            slippage: 'auto',
+            mev: true,
+            gasLevel: 'MEDIUM'
+          };
 
       let placeRes = await callBinanceBapi(
         endpoint,
@@ -1155,10 +1168,19 @@ export async function executeBasketAutonomous(req, body = {}) {
 
       // Graceful fallback: if ondo endpoint rejected with non-zero or not found, try standard place-order
       if (isOndo && (!placeRes?.data || placeRes.data.code !== '000000')) {
+        const fallbackPayload = {
+          binanceChainId: '56',
+          fromToken: sourceTokenAddr,
+          toToken: usdtAddress,
+          amount: String(sellQty),
+          slippage: 'auto',
+          mev: true,
+          gasLevel: 'MEDIUM'
+        };
         const fallbackRes = await callBinanceBapi(
           '/bapi/defi/v1/public/wallet-direct/web-dex/agent/place-order',
           'POST',
-          placePayload,
+          fallbackPayload,
           session.agentSessionId,
           session.clientId
         );
@@ -1227,7 +1249,21 @@ export async function executeBasketAutonomous(req, body = {}) {
             : `Sell order submitted for ${sellQty} ${fromTicker} → USDT. Processing on BSC DEX.`
         };
       } else {
-        const errMsg = resData?.message || resData?.error || 'Binance sell order submission rejected';
+        console.error('[Binance DEX Sell Rejection]', JSON.stringify({
+          endpoint,
+          status: placeRes?.status,
+          resData
+        }));
+
+        let errMsg = resData?.message || resData?.msg || resData?.subMsg || resData?.error || resData?.messageDetail?.title;
+        if (resData?.code === '100001005' || resData?.code === '10003000' || errMsg?.toLowerCase().includes('log in')) {
+          errMsg = 'Binance Agentic session expired or unauthorized. Please re-pair your wallet by scanning the QR code in the Binance App.';
+        } else if (!errMsg && resData?.code) {
+          errMsg = `Binance DEX rejected order with code ${resData.code}.`;
+        } else if (!errMsg) {
+          errMsg = 'Binance sell order submission rejected by DEX.';
+        }
+
         return {
           success: false,
           status: 400,
@@ -1294,17 +1330,30 @@ export async function executeBasketAutonomous(req, body = {}) {
         ? '/bapi/defi/v1/public/wallet-direct/web-dex/agent/ondo/place-order'
         : '/bapi/defi/v1/public/wallet-direct/web-dex/agent/place-order';
 
-      const leg1Payload = {
-        binanceChainId: '56',
-        fromToken: sourceTokenAddr,
-        toToken: usdtAddress,
-        amount: String(sellQty),
-        slippage: 'auto',
-        tokenShare: String(sellQty),
-        multiplier: 1.0,
-        mev: true,
-        gasLevel: 'MEDIUM'
-      };
+      const tokenMultiplier1 = BSC_RWA_TOKENS[fromTicker]?.multiplier || 1.0;
+      const tokenAmount1 = tokenMultiplier1 !== 1.0
+        ? (sellQty / tokenMultiplier1).toFixed(8)
+        : String(sellQty);
+
+      const leg1Payload = isOndo1
+        ? {
+            binanceChainId: '56',
+            fromToken: sourceTokenAddr,
+            toToken: usdtAddress,
+            amount: tokenAmount1,
+            slippage: 'auto',
+            tokenShare: String(sellQty),
+            multiplier: tokenMultiplier1
+          }
+        : {
+            binanceChainId: '56',
+            fromToken: sourceTokenAddr,
+            toToken: usdtAddress,
+            amount: String(sellQty),
+            slippage: 'auto',
+            mev: true,
+            gasLevel: 'MEDIUM'
+          };
 
       let leg1Res = await callBinanceBapi(
         endpoint1,
@@ -1315,10 +1364,19 @@ export async function executeBasketAutonomous(req, body = {}) {
       );
 
       if (isOndo1 && (!leg1Res?.data || leg1Res.data.code !== '000000')) {
+        const fallback1Payload = {
+          binanceChainId: '56',
+          fromToken: sourceTokenAddr,
+          toToken: usdtAddress,
+          amount: String(sellQty),
+          slippage: 'auto',
+          mev: true,
+          gasLevel: 'MEDIUM'
+        };
         const fallback1 = await callBinanceBapi(
           '/bapi/defi/v1/public/wallet-direct/web-dex/agent/place-order',
           'POST',
-          leg1Payload,
+          fallback1Payload,
           session.agentSessionId,
           session.clientId
         );
@@ -1327,11 +1385,17 @@ export async function executeBasketAutonomous(req, body = {}) {
 
       const res1 = leg1Res?.data;
       if (!res1 || res1.code !== '000000' || !res1.data?.orderId) {
+        let errLeg1 = res1?.message || res1?.msg || res1?.subMsg || res1?.error || res1?.messageDetail?.title;
+        if (res1?.code === '100001005' || res1?.code === '10003000' || errLeg1?.toLowerCase().includes('log in')) {
+          errLeg1 = 'Binance Agentic session expired or unauthorized. Please re-pair your wallet by scanning the QR code in the Binance App.';
+        } else if (!errLeg1 && res1?.code) {
+          errLeg1 = `Binance DEX error ${res1.code}`;
+        }
         return {
           success: false,
           status: 400,
           code: 'ORDER_SUBMISSION_REJECTED',
-          error: `Rotation Leg 1 (${fromTicker} → USDT) rejected: ${res1?.message || res1?.error || 'Order failed'}`
+          error: `Rotation Leg 1 (${fromTicker} → USDT) rejected: ${errLeg1 || 'Order failed'}`
         };
       }
 
@@ -1373,17 +1437,25 @@ export async function executeBasketAutonomous(req, body = {}) {
         ? '/bapi/defi/v1/public/wallet-direct/web-dex/agent/ondo/place-order'
         : '/bapi/defi/v1/public/wallet-direct/web-dex/agent/place-order';
 
-      const leg2Payload = {
-        binanceChainId: '56',
-        fromToken: usdtAddress,
-        toToken: targetTokenAddr,
-        amount: String(usdtAcquired),
-        slippage: 'auto',
-        tokenShare: null,
-        multiplier: null,
-        mev: true,
-        gasLevel: 'MEDIUM'
-      };
+      const leg2Payload = isOndo2
+        ? {
+            binanceChainId: '56',
+            fromToken: usdtAddress,
+            toToken: targetTokenAddr,
+            amount: String(usdtAcquired),
+            slippage: 'auto',
+            tokenShare: null,
+            multiplier: null
+          }
+        : {
+            binanceChainId: '56',
+            fromToken: usdtAddress,
+            toToken: targetTokenAddr,
+            amount: String(usdtAcquired),
+            slippage: 'auto',
+            mev: true,
+            gasLevel: 'MEDIUM'
+          };
 
       let leg2Res = await callBinanceBapi(
         endpoint2,
@@ -1394,10 +1466,19 @@ export async function executeBasketAutonomous(req, body = {}) {
       );
 
       if (isOndo2 && (!leg2Res?.data || leg2Res.data.code !== '000000')) {
+        const fallback2Payload = {
+          binanceChainId: '56',
+          fromToken: usdtAddress,
+          toToken: targetTokenAddr,
+          amount: String(usdtAcquired),
+          slippage: 'auto',
+          mev: true,
+          gasLevel: 'MEDIUM'
+        };
         const fallback2 = await callBinanceBapi(
           '/bapi/defi/v1/public/wallet-direct/web-dex/agent/place-order',
           'POST',
-          leg2Payload,
+          fallback2Payload,
           session.agentSessionId,
           session.clientId
         );
@@ -1568,17 +1649,25 @@ export async function executeBasketAutonomous(req, body = {}) {
         ? '/bapi/defi/v1/public/wallet-direct/web-dex/agent/ondo/place-order'
         : '/bapi/defi/v1/public/wallet-direct/web-dex/agent/place-order';
 
-      const placePayload = {
-        binanceChainId: '56',
-        fromToken: BSC_RWA_TOKENS.USDT.contractAddress,
-        toToken: targetToken,
-        amount: String(legUsdt),
-        slippage: 'auto',
-        tokenShare: null,
-        multiplier: null,
-        mev: true,
-        gasLevel: 'MEDIUM'
-      };
+      const placePayload = isOndo
+        ? {
+            binanceChainId: '56',
+            fromToken: BSC_RWA_TOKENS.USDT.contractAddress,
+            toToken: targetToken,
+            amount: String(legUsdt),
+            slippage: 'auto',
+            tokenShare: null,
+            multiplier: null
+          }
+        : {
+            binanceChainId: '56',
+            fromToken: BSC_RWA_TOKENS.USDT.contractAddress,
+            toToken: targetToken,
+            amount: String(legUsdt),
+            slippage: 'auto',
+            mev: true,
+            gasLevel: 'MEDIUM'
+          };
 
       let placeRes = await callBinanceBapi(
         endpoint,
@@ -1589,10 +1678,19 @@ export async function executeBasketAutonomous(req, body = {}) {
       );
 
       if (isOndo && (!placeRes?.data || placeRes.data.code !== '000000')) {
+        const fallbackPayload = {
+          binanceChainId: '56',
+          fromToken: BSC_RWA_TOKENS.USDT.contractAddress,
+          toToken: targetToken,
+          amount: String(legUsdt),
+          slippage: 'auto',
+          mev: true,
+          gasLevel: 'MEDIUM'
+        };
         const fallbackRes = await callBinanceBapi(
           '/bapi/defi/v1/public/wallet-direct/web-dex/agent/place-order',
           'POST',
-          placePayload,
+          fallbackPayload,
           session.agentSessionId,
           session.clientId
         );
@@ -1646,7 +1744,14 @@ export async function executeBasketAutonomous(req, body = {}) {
         });
         totalSpentUsdt += legUsdt;
       } else {
-        const errMsg = resData?.message || resData?.error || 'Binance order submission rejected';
+        let errMsg = resData?.message || resData?.msg || resData?.subMsg || resData?.error || resData?.messageDetail?.title;
+        if (resData?.code === '100001005' || resData?.code === '10003000' || errMsg?.toLowerCase().includes('log in')) {
+          errMsg = 'Binance Agentic session expired or unauthorized. Please re-pair your wallet by scanning the QR code in the Binance App.';
+        } else if (!errMsg && resData?.code) {
+          errMsg = `Binance DEX error ${resData.code}`;
+        } else if (!errMsg) {
+          errMsg = 'Binance order submission rejected';
+        }
         results.push({
           ticker,
           name: alloc.name || ticker,

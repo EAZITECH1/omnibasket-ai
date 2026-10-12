@@ -24,7 +24,7 @@ export const BSC_RWA_TOKENS = {
     decimals: 18,
     type: 1,
     category: 'AI & Semiconductors',
-    multiplier: 1.0,
+    multiplier: 1.0017152487959898,
     tradableOnBscDEX: true,
     preferredRoute: ['USDT', 'NVDA']
   },
@@ -36,7 +36,7 @@ export const BSC_RWA_TOKENS = {
     decimals: 18,
     type: 1,
     category: 'Tech Giants',
-    multiplier: 1.0,
+    multiplier: 1.003376073740221058,
     tradableOnBscDEX: true,
     preferredRoute: ['USDT', 'AAPL']
   },
@@ -48,7 +48,7 @@ export const BSC_RWA_TOKENS = {
     decimals: 18,
     type: 1,
     category: 'Cloud & AI',
-    multiplier: 1.0,
+    multiplier: 1.005730856892783903,
     tradableOnBscDEX: true,
     preferredRoute: ['USDT', 'MSFT']
   },
